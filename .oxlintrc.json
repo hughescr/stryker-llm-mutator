@@ -1,0 +1,146 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "plugins": [
+    "typescript",
+    "unicorn",
+    "oxc",
+    "import",
+    "promise",
+    "node",
+    "jsdoc",
+    "jest"
+  ],
+  "categories": {
+    "correctness": "error"
+  },
+  "env": {
+    "node": true,
+    "es2024": true
+  },
+  "globals": {
+    "Bun": "readonly"
+  },
+  "settings": {},
+  "ignorePatterns": [
+    "dist/",
+    "node_modules/",
+    ".stryker-tmp/",
+    "reports/",
+    ".serena/",
+    ".claude/",
+    "coverage/",
+    "*.config.json",
+    "stryker-incremental.json"
+  ],
+  "jsPlugins": [
+    "./oxlint-plugins/test-hygiene.ts"
+  ],
+  "rules": {
+    "no-eval": "warn",
+    "block-scoped-var": "error",
+    "complexity": ["warn", 15],
+    "curly": ["warn", "all"],
+    "default-case-last": "warn",
+    "default-param-last": "error",
+    "dot-notation": "warn",
+    "eqeqeq": ["warn", "always"],
+    "no-bitwise": "warn",
+    "no-console": "warn",
+    "no-constant-condition": ["warn", { "checkLoops": "allExceptWhileTrue" }],
+    "no-constructor-return": "warn",
+    "no-control-regex": "off",
+    "no-fallthrough": ["error", { "allowEmptyCase": true }],
+    "no-nested-ternary": "error",
+    "no-param-reassign": ["warn", { "props": false }],
+    "no-promise-executor-return": "error",
+    "no-self-compare": "error",
+    "no-sequences": "error",
+    "no-shadow": "warn",
+    "no-unmodified-loop-condition": "error",
+    "no-unneeded-ternary": "error",
+    "no-unused-expressions": ["error", { "allowShortCircuit": true, "allowTernary": true }],
+    "no-unused-vars": ["warn", { "args": "after-used", "argsIgnorePattern": "^_", "varsIgnorePattern": "^_" }],
+    "no-useless-call": "error",
+    "no-useless-concat": "error",
+    "no-var": "warn",
+    "prefer-arrow-callback": ["warn", { "allowNamedFunctions": true }],
+    "prefer-const": "warn",
+    "prefer-object-spread": "warn",
+    "no-template-curly-in-string": "error",
+    "no-await-in-loop": "warn",
+    "no-new-wrappers": "error",
+    "no-throw-literal": "error",
+    "prefer-promise-reject-errors": "warn",
+    "symbol-description": "warn",
+    "prefer-template": "warn",
+    "prefer-exponentiation-operator": "warn",
+    "logical-assignment-operators": "warn",
+    "prefer-object-has-own": "warn",
+    "no-useless-constructor": "warn",
+    "no-useless-rename": "warn",
+    "no-useless-computed-key": "warn",
+    "object-shorthand": "warn",
+    "no-return-assign": ["error", "always"],
+    "no-restricted-imports": ["warn", { "paths": [{ "name": "lodash", "message": "Use lodash-es instead for proper ESM tree-shaking." }] }],
+
+    "unicorn/no-null": "off",
+    "unicorn/filename-case": ["warn", { "cases": { "kebabCase": true, "pascalCase": true } }],
+    "unicorn/catch-error-name": ["warn", { "ignore": ["^e$", "^err$", "^error$"] }],
+    "unicorn/no-useless-error-capture-stack-trace": "off",
+    "unicorn/no-useless-undefined": "off",
+    "unicorn/prefer-at": "off",
+    "unicorn/no-abusive-eslint-disable": "warn",
+
+    "import/no-duplicates": ["warn", { "prefer-inline": true }],
+    "import/no-self-import": "error",
+    "import/no-cycle": "warn",
+    "import/newline-after-import": "warn",
+    "import/no-mutable-exports": "warn",
+    "import/no-empty-named-blocks": "warn",
+    "import/no-anonymous-default-export": "warn",
+
+    "promise/always-return": "warn",
+    "promise/catch-or-return": "warn",
+    "promise/param-names": "warn",
+
+    "node/callback-return": ["error", ["callback", "cb", "next", "done"]],
+    "node/handle-callback-err": "warn",
+    "node/no-path-concat": "error",
+    "node/no-sync": "warn",
+
+    "typescript/no-explicit-any": "warn",
+    "typescript/consistent-type-imports": ["warn", { "prefer": "type-imports", "fixStyle": "inline-type-imports" }],
+    "typescript/no-non-null-assertion": "warn",
+    "typescript/ban-ts-comment": "warn",
+    "typescript/no-inferrable-types": "warn",
+    "typescript/no-empty-object-type": "warn",
+    "typescript/no-unnecessary-type-constraint": "warn",
+    "typescript/no-duplicate-enum-values": "error",
+    "typescript/prefer-as-const": "warn",
+    "typescript/consistent-type-definitions": "off",
+
+    "test-hygiene/no-mock-module-in-test-body": ["error", { "setupFiles": ["tests/setup.ts"] }],
+    "test-hygiene/require-fake-timers-cleanup": "error",
+    "test-hygiene/require-mock-cleanup": "error",
+    "test-hygiene/require-mock-reset": ["error", { "mocks": {}, "setupModules": ["setup"] }]
+  },
+  "overrides": [
+    {
+      "files": ["**/*.{test,spec}.{js,cjs,mjs,jsx,ts,cts,mts,tsx}"],
+      "plugins": ["jest"],
+      "rules": {
+        "typescript/no-non-null-assertion": "off",
+        "typescript/no-explicit-any": "off",
+        "unicorn/consistent-function-scoping": "off",
+        "require-yield": "off"
+      }
+    },
+    {
+      "files": ["oxlint-plugins/**/*.ts"],
+      "rules": {
+        "typescript/no-explicit-any": "off",
+        "complexity": "off"
+      }
+    }
+  ]
+}

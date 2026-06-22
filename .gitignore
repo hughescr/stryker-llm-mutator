@@ -1,0 +1,46 @@
+# Dependencies
+node_modules/
+
+# Build output
+/dist/
+
+# Coverage
+/coverage/
+/.nyc_output/
+
+# IDE
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Temporary files
+*.tmp
+.tmp/
+
+# Stryker
+/.stryker-tmp/
+/reports/
+stryker-incremental.json
+/.serena/
+.claude/settings.local.json
+.claude/scheduled_tasks.lock
+
+# oxlint
+.oxlintcache

@@ -1,0 +1,72 @@
+{
+  "name": "@hughescr/stryker-llm-mutator",
+  "version": "0.1.0",
+  "description": "LLM-driven mutation generator plugin for Stryker, producing a wider variety of mutants than the built-in formulaic mutators",
+  "keywords": [
+    "stryker",
+    "stryker-plugin",
+    "mutation-testing",
+    "mutant",
+    "llm",
+    "ai",
+    "anthropic",
+    "claude",
+    "haiku",
+    "bun"
+  ],
+  "homepage": "https://github.com/hughescr/stryker-llm-mutator#readme",
+  "bugs": {
+    "url": "https://github.com/hughescr/stryker-llm-mutator/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hughescr/stryker-llm-mutator.git"
+  },
+  "license": "Apache-2.0",
+  "author": "hughescr",
+  "sideEffects": false,
+  "type": "module",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "bun build src/index.ts --outdir dist --target node --format esm && dts-bundle-generator --config dts-bundle-generator.config.json",
+    "lint": "oxlint",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test",
+    "mutate": "stryker run",
+    "clones": "jscpd src/",
+    "dead-code": "knip",
+    "prepublishOnly": "bun run build",
+    "postversion": "git commit -m \"Bump package version to $npm_package_version\" package.json; git flow release start $npm_package_version; git flow release finish -m $npm_package_version $npm_package_version; git checkout develop; git merge main"
+  },
+  "dependencies": {
+    "@stryker-mutator/api": "9.6.1"
+  },
+  "peerDependencies": {
+    "@stryker-mutator/core": "^9.0.0"
+  },
+  "devDependencies": {
+    "@hughescr/stryker-bun-runner": "1.2.2",
+    "@stryker-mutator/core": "9.6.1",
+    "@stryker-mutator/typescript-checker": "9.6.1",
+    "@types/bun": "1.3.14",
+    "@types/node": "26.0.0",
+    "dts-bundle-generator": "9.5.1",
+    "jscpd": "5.0.11",
+    "knip": "6.18.0",
+    "oxlint": "1.71.0",
+    "typescript": "6.0.3"
+  },
+  "engines": {
+    "bun": ">=1.3.14"
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(bun run:*)",
+      "Bash(bunx oxlint:*)",
+      "Skill(commit-commands:commit)",
+      "Skill(codex:codex)",
+      "Skill(codex-cli-reference)"
+    ]
+  },
+  "sandbox": {
+    "enabled": true,
+    "autoAllowBashIfSandboxed": true
+  }
+}
