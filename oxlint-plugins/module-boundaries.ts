@@ -47,7 +47,7 @@ import type { Plugin } from 'oxlint/plugins-dev';
 // Intentionally empty: the three module-boundaries rules cannot be implemented
 // without a TypeScript Program, which oxlint JS plugins do not provide.
 const plugin: Plugin = {
-    meta:  { name: 'module-boundaries' },
+    meta: { name: 'module-boundaries' },
     rules: {
         // TODO(type-aware): port once/if oxlint exposes parserServices.program to
         // JS plugins. Until then these remain LOST — see docs/oxlint-coverage.md.

@@ -48,7 +48,7 @@ core namespace is always active.
 | `eslint-plugin-n` (node) | **native (subset)** | `callback-return`, `handle-callback-err`, `no-path-concat`, `no-sync` ported. **Dropped:** `no-callback-literal` (no oxlint rule). `no-unsupported-features/*` were already off (Bun). |
 | `eslint-plugin-regexp` | **LOST** | oxlint has **no** `regexp/` plugin namespace. The ~18 `regexp/*` overrides (`prefer-d`, `prefer-w`, `match-any`, `no-dupe-characters-character-class`, etc.) have no equivalent. A few overlap with eslint-core regex rules oxlint does have (`no-control-regex`, `no-invalid-regexp`, `no-misleading-character-class`) but the dedicated regexp set is gone. |
 | `@eslint-community/eslint-comments` | **LOST (mostly)** + option | No `eslint-comments/` plugin in oxlint. Unused-disable detection is provided by oxlint's `options.reportUnusedDisableDirectives` / `--report-unused-disable-directives` instead (not a rule). `no-abusive-eslint-disable` (unicorn) covers part of `no-unlimited-disable`. `disable-enable-pair`, `require-description`, `no-use`, `no-aggregating-enable` are LOST. |
-| `@stylistic/*` (formatting) | **LOST** | oxlint defers formatting to a formatter (oxfmt, alpha). None of the ~30 `@stylistic/*` formatting rules (indent=4, quotes=single, semi, comma-dangle, key-spacing align, keyword-spacing overrides, etc.) are available. Mirror the template repo's formatting approach instead; do **not** adopt oxfmt yet. |
+| `@stylistic/*` (formatting) | **LOST as lint** → **recovered by oxfmt** | oxlint defers formatting to a formatter. None of the ~30 `@stylistic/*` formatting rules exist as oxlint *rules*, but the formatting they enforced (indent=4, quotes=single, semi, comma-dangle, etc.) is now applied by **oxfmt** (`.oxfmtrc.json`, `format` script). See the **Formatting (oxfmt)** section below. The single exception is `key-spacing align:value` (value-aligned keys), which no Prettier-family formatter can reproduce — a permanent gap. |
 | `eslint-plugin-sonarjs` | **LOST** | No `sonarjs` plugin. `cognitive-complexity` has no oxlint analogue (oxlint's eslint-core `complexity` is enabled as a partial substitute). Use `jscpd` separately for duplicate detection. `no-collapsible-if`, `prefer-immediate-return` LOST. |
 | `eslint-plugin-lodash` | **LOST** | No `lodash` plugin in oxlint. (lodash-specific; acceptable gap.) |
 | `eslint-plugin-lodash-es` | **LOST** | No equivalent. `no-restricted-imports` of bare `lodash` is preserved as a partial substitute. |
@@ -70,6 +70,28 @@ To recover the typescript-eslint type-checked rules natively, add the optional
 `oxlint --type-aware`). This powers oxlint's **native** TS rules only — it still
 does **not** expose type info to the custom JS plugins, so the three
 `module-boundaries` rules remain LOST regardless.
+
+## Formatting (oxfmt)
+
+The `@stylistic/*` formatting rules above are **LOST** as *lint* rules, but the
+formatting itself is recovered by **oxfmt** (`oxfmt@0.56.0`, oxc's
+Prettier-compatible formatter), configured in `.oxfmtrc.json` and run via the
+`format` / `format:check` scripts (scoped to JS/TS only — JSON, markdown and
+lockfiles are intentionally excluded, since they were never part of the
+`@stylistic` layer). It reproduces the bulk of the `@hughescr` house style:
+**4-space indent, single quotes, semicolons, arrow-paren avoidance
+(`arrowParens: avoid`), LF line endings, and trailing commas**. Import ordering
+stays owned by oxlint (`import-x/order`, so `sortImports: false`) and
+`package.json` key-order is left to lint (`sortPackageJson: false`), so oxfmt
+never fights the linter.
+
+The **one** house trait oxfmt cannot reproduce is
+`@stylistic/key-spacing` with `align: 'value'` — the value-aligned object keys /
+interface members (extra spaces after the colon so values line up in a column).
+**No Prettier-family formatter** (Prettier, Biome, oxfmt) supports column
+alignment, by design, so this is a **permanent, documented gap**: object and
+interface members will be single-space after the colon rather than
+value-aligned. Everything else from the `@stylistic` layer is restored.
 
 ## Summary
 

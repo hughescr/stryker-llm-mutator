@@ -6,7 +6,7 @@ const config: KnipConfig = {
     // *.conf.mjs / *.config.* cover stryker.conf.mjs and dts-bundle-generator etc.
     // oxlint custom JS plugins are loaded by the oxlint binary, not imported by
     // our source, so they are entry points too (and not dead code).
-    entry:   [
+    entry: [
         'src/index.ts',
         '*.conf.mjs',
         '*.config.ts',
@@ -14,9 +14,7 @@ const config: KnipConfig = {
         'tests/**/*.ts',
         'oxlint-plugins/**/*.ts',
     ],
-    project: [
-        'src/**/*.ts',
-    ],
+    project: ['src/**/*.ts'],
     ignoreDependencies: [
         // Knip's Stryker plugin maps `testRunner: 'bun'` to this package name,
         // but we use @hughescr/stryker-bun-runner (referenced in the plugins

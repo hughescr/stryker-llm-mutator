@@ -40,6 +40,8 @@
   "scripts": {
     "build": "bun build src/index.ts --outdir dist --target node --format esm && dts-bundle-generator --config dts-bundle-generator.config.json",
     "lint": "oxlint",
+    "format": "oxfmt \"**/*.{ts,mts,cts,mjs,cjs,js}\"",
+    "format:check": "oxfmt --check \"**/*.{ts,mts,cts,mjs,cjs,js}\"",
     "typecheck": "tsc --noEmit",
     "test": "bun test",
     "mutate": "stryker run",
@@ -63,6 +65,7 @@
     "dts-bundle-generator": "9.5.1",
     "jscpd": "5.0.11",
     "knip": "6.18.0",
+    "oxfmt": "0.56.0",
     "oxlint": "1.71.0",
     "typescript": "6.0.3"
   },
