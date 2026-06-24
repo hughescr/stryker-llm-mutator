@@ -14,10 +14,15 @@ import { boundaryOffByOneMutator } from './boundary-off-by-one';
 import { fallbackOperandSubstitutionMutator } from './fallback-operand-substitution';
 import { numberLiteralValueMutator } from './number-literal-value';
 
-export type { NodeMutator } from './types';
+export type { NodeMutator, NodePath } from './types';
 export { boundaryOffByOneMutator } from './boundary-off-by-one';
 export { fallbackOperandSubstitutionMutator } from './fallback-operand-substitution';
 export { numberLiteralValueMutator } from './number-literal-value';
+
+// The injected dynamic-LLM NodeMutator (M3): a sync map lookup over the pre-pass
+// precomputed map. NOT part of `heuristicMutators` (it is built per-run from the
+// LLM map, not a fixed singleton); the driver pushes it alongside the heuristics.
+export { createLlmMutator, LLM_MUTATOR_NAME } from './llm-mutator';
 
 /**
  * Every heuristic mutator this package ships, in a stable order. This is the

@@ -25,10 +25,12 @@ export {
     SUPPORTED_CONFIG_FILE_NAMES,
 } from './config-reader';
 
-// ── Switch gating + credentials + Phase-A LLM stub (PURE) ────────────────────
+// ── Switch gating + credentials + M3 LLM pre-pass orchestrator (PURE) ────────
 export {
     assertLlmCredentials,
     buildLlmMutator,
+    type BuildLlmMutatorDeps,
+    type BuildLlmMutatorResult,
     gateSwitches,
     type GatePlan,
     MissingCredentialsError,

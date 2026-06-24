@@ -50,6 +50,25 @@ import type {
 export interface NodePath {
     /** The AST node this path points at. */
     readonly node: Node;
+    /**
+     * The babel traversal `hub`, present when the AST is traversed wrapped in a
+     * babel `File` (which is exactly what Stryker's `babel-transformer` does:
+     * `new File({ filename }, ...)`). The injected `LLMMutator` reads the current
+     * source file from `hub.file.opts.filename` to key its per-file map lookup.
+     *
+     * OPTIONAL by design: a bare `traverse` over an unwrapped AST (as the
+     * heuristic-mutator tests do) does NOT populate `hub`, so leaving it optional
+     * keeps those fake `NodePath`s assignable, and a missing `hub` degrades the
+     * `LLMMutator` to a clean no-match rather than a throw. Stryker's real
+     * `NodePath` is a structural superset of this slice.
+     */
+    readonly hub?: {
+        readonly file?: {
+            readonly opts?: {
+                readonly filename?: string;
+            };
+        };
+    };
     /** Narrows `node` to `NumericLiteral` (e.g. `42`, `3.14`, `0xff`, `1_000`). */
     isNumericLiteral(): this is { readonly node: NumericLiteral };
     /** Narrows `node` to `StringLiteral`. */

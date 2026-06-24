@@ -25,7 +25,25 @@
  * rather than appearing to work.
  */
 
-import { resolveAuthEnv } from '../llm/index';
+import {
+    resolveAuthEnv,
+    type CostAccumulator,
+    type CostSnapshot,
+    type LLMProvider,
+} from '../llm/index';
+import {
+    buildProposeTargets,
+    type CoverageLookup,
+    type SourceFileInput,
+} from '../pipeline/targeting';
+import { runPrePass, type PrePassLogger } from '../pipeline/prepass';
+import {
+    buildLlmMutatorMap,
+    type DroppedReplacement,
+    type LlmMutatorMap,
+} from '../pipeline/llm-map';
+import { createLlmMutator } from '../mutators/llm-mutator';
+import type { NodeMutator } from '../mutators/index';
 import type { LlmMutatorConfig } from '../config';
 
 /**
@@ -177,20 +195,117 @@ export function assertLlmCredentials(
     }
 }
 
+/** Injected dependencies for {@link buildLlmMutator} — all bun-mockable. */
+export interface BuildLlmMutatorDeps {
+    /**
+     * The BUDGETED provider (cache + cost + ceiling enforcement). Injected so the
+     * orchestrator is bun-testable with a MockProvider; run.ts builds the real
+     * `createBudgetedProvider(createProvider(cfg), …)` and passes it.
+     */
+    provider: LLMProvider;
+    /**
+     * The SAME cost accumulator the budgeted `provider` records into. The pre-pass
+     * reads its snapshot for the final cost report; sharing one instance keeps the
+     * provider's spend and the report in lockstep.
+     */
+    costAccumulator: CostAccumulator;
+    /** The absolute-path source files Stryker will mutate (read in run.ts). */
+    files: readonly SourceFileInput[];
+    /**
+     * The cwd the map-builder resolves non-absolute fileNames against — must be
+     * the dir Stryker keys absolute paths by (the project root). The targeting
+     * already emits absolute fileNames, so this only normalizes defensively.
+     */
+    cwd: string;
+    /** Note logger (targeting notes, pre-pass stops, dropped near-equivalents). */
+    log?: PrePassLogger;
+    /** Optional coverage probe; absent ⇒ no coverage signal (treat as eligible). */
+    coverageLookup?: CoverageLookup;
+    /** Cooperative cancellation signal forwarded to the pre-pass. */
+    signal?: AbortSignal;
+}
+
+/** The outcome of {@link buildLlmMutator}: the injected mutator + run metadata. */
+export interface BuildLlmMutatorResult {
+    /** The single `llm` NodeMutator to push onto `allMutators` (sync map lookup). */
+    mutator: NodeMutator;
+    /** The precomputed map (also drives the reporter's id→tag enrichment). */
+    map: LlmMutatorMap;
+    /** Final LLM cost snapshot for the reporter. */
+    costSnapshot: CostSnapshot;
+    /** Statement-shaped + near-equivalent drops, for the run log. */
+    droppedLog: DroppedReplacement[];
+}
+
 /**
- * Phase-A dynamic-LLM generation seam. M3 will replace the throw with the real
- * pre-pass: target → batched propose → filters → build a `(fileName,loc)→Node[]`
- * map → return ONE injected `llm/<tag>` `LLMMutator` doing a sync map lookup. In
- * Phase A it ALWAYS throws {@link NotImplementedError} so the dynamicLLM switch is
- * HONEST today — it never silently produces zero mutants and never degrades.
+ * The REAL dynamic-LLM pre-pass orchestrator (M3) — replaces the Phase-A throw.
+ * It runs entirely on the injected `LLMProvider` abstraction, so it is
+ * bun-testable offline with a MockProvider (no Stryker, no network):
  *
- * The driver calls {@link assertLlmCredentials} BEFORE this, so missing creds
- * surface as a credentials error; if creds are present, this throws the
- * not-implemented error.
+ *   1. Gate 1/2 — `buildProposeTargets(files, cfg)` → EV-ranked function targets;
+ *   2. Gate 3/4 — `runPrePass(provider, targets, cfg, …)` → filtered survivors
+ *      (cache + budget + diminishing-returns all enforced inside);
+ *   3. build the precomputed `(absFileName, locKey) → ParsedEntry[]` map from the
+ *      survivors (`buildLlmMutatorMap`, statement-shaped drops logged);
+ *   4. wrap it in ONE sync `createLlmMutator(map)` NodeMutator.
+ *
+ * The driver calls {@link assertLlmCredentials} BEFORE constructing the provider,
+ * so missing creds surface as a credentials error; this orchestrator assumes a
+ * ready provider. It is async (the LLM work is the pre-pass); the RETURNED mutator
+ * is synchronous (the seam invariant).
+ *
+ * @param cfg The parsed config (targeting + budget + diminishingReturns).
+ * @param deps Injected provider, files, cwd, logger, coverage probe, signal.
+ * @returns The injected mutator, the map, the cost snapshot, and the drop log.
  */
-export function buildLlmMutator(_cfg: LlmMutatorConfig): never {
-    throw new NotImplementedError(
-        'dynamicLLM is enabled but the LLM pre-pass + LLMMutator are not implemented yet ' +
-            '(arrives in M3). Run with dynamicLLM disabled for heuristics-only.',
-    );
+export async function buildLlmMutator(
+    cfg: LlmMutatorConfig,
+    deps: BuildLlmMutatorDeps,
+): Promise<BuildLlmMutatorResult> {
+    const { provider, files, cwd, log, coverageLookup, signal } = deps;
+
+    const { targets } = buildProposeTargets(files, cfg, {
+        ...(log === undefined ? {} : { log }),
+        ...(coverageLookup === undefined ? {} : { coverageLookup }),
+    });
+
+    // The cost accumulator lives inside the budgeted provider; the pre-pass reads
+    // its snapshot. We reconstruct a thin accumulator view by letting runPrePass
+    // own the snapshot via the same accumulator the budgeted provider records to.
+    const prePass = await runPrePass(provider, targets, cfg, {
+        cost: deps.costAccumulator,
+        ...(log === undefined ? {} : { log }),
+        ...(signal === undefined ? {} : { signal }),
+    });
+
+    const { map, dropped } = buildLlmMutatorMap(prePass.survivors, cwd);
+    for (const drop of prePass.dropped) {
+        dropped.push(drop);
+    }
+    if (log !== undefined) {
+        log(
+            `LLM pre-pass: ${String(prePass.survivors.length)} survivor(s) → ` +
+                `${String(countEntries(map))} mutant candidate(s); ` +
+                `${String(dropped.length)} dropped; stop=${prePass.stopReason}; ` +
+                `cost $${prePass.cost.totalUsd.toFixed(2)} / ${String(prePass.cost.calls)} calls`,
+        );
+    }
+
+    return {
+        mutator: createLlmMutator(map),
+        map,
+        costSnapshot: prePass.cost,
+        droppedLog: dropped,
+    };
+}
+
+/** Count total candidate entries across the two-level map. */
+function countEntries(map: LlmMutatorMap): number {
+    let total = 0;
+    for (const byLoc of map.values()) {
+        for (const entries of byLoc.values()) {
+            total += entries.length;
+        }
+    }
+    return total;
 }

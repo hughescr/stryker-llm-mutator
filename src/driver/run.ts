@@ -6,12 +6,14 @@
  *   (1) read + parse the target config (`readTargetConfig`);
  *   (2) build the PURE run plan (`buildRunPlan`) — gate switches, select
  *       heuristics, map flags → Stryker options, decide injection mode;
- *   (3) dynamicLLM gating: credential fail-fast + the Phase-A throw-stub;
+ *   (3) dynamicLLM gating: credential fail-fast, then the M3 async pre-pass that
+ *       targets → batched propose → filters → builds the precomputed map → ONE
+ *       injected synchronous `llm` LLMMutator;
  *   (4) `injectMutators(selected, { mode })` into the deep-imported `allMutators`;
  *   (5) `process.chdir(projectDir)` so Stryker resolves config/target/reporters
  *       from the project root (exactly as m0 does);
  *   (6) construct `new Stryker(partialOptions)` and `await runMutationTest()`;
- *   (7) return the `MutantResult[]`.
+ *   (7) run the M4 reporter (survivor view + cost) over the `MutantResult[]`.
  *
  * SAME-INSTANCE GUARANTEE: `injectMutators` deep-imports `allMutators` from THIS
  * package's `node_modules/@stryker-mutator/instrumenter/...`, and `Stryker` here
@@ -24,17 +26,27 @@
  * by `bun test` and is COVERAGE-EXEMPT (added to bunfig `coveragePathIgnorePatterns`,
  * like `scripts/`); the live invocation is the human-run isambard proof. All the
  * PURE decision logic it calls (`buildRunPlan`, `selectHeuristicMutators`,
- * `gateSwitches`, `assertLlmCredentials`, `parseArgs`, `readTargetConfig`) IS
- * unit-tested offline. The DRY-RUN path here also avoids `new Stryker()`, so it is
- * sandbox-safe.
+ * `gateSwitches`, `assertLlmCredentials`, `buildLlmMutator`, `parseArgs`,
+ * `readTargetConfig`, `formatReport`) IS unit-tested offline. The DRY-RUN path
+ * here also avoids `new Stryker()`, so it is sandbox-safe.
  */
 
 import process from 'node:process';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { dirname, resolve } from 'node:path';
+import { Glob } from 'bun';
 
 import { Stryker } from '@stryker-mutator/core';
 import type { MutantResult, PartialStrykerOptions } from '@stryker-mutator/api/core';
 
 import { injectMutators } from '../injection';
+import { createProvider } from '../llm/factory';
+import { CostAccumulator, ResponseCache } from '../llm/index';
+import { createBudgetedProvider } from '../pipeline/budgeted-provider';
+import { LLM_MUTATOR_NAME } from '../mutators/llm-mutator';
+import { type LlmMutatorMap, locKeyFromBabelLoc } from '../pipeline/llm-map';
+import type { SourceFileInput } from '../pipeline/targeting';
+import { formatReport, type MutantEnrichment, type ReportOutput } from '../report/index';
 import type { RunOptions } from './cli-args';
 import { readTargetConfig } from './config-reader';
 import { assertLlmCredentials, buildLlmMutator } from './gate';
@@ -99,15 +111,42 @@ export async function runLlmMutation(
     const plan = buildRunPlan(opts, config, configFilePath);
     printPlan(plan, log);
 
-    // (3) DynamicLLM gating: credential fail-fast (real), then the Phase-A stub.
-    //     buildLlmMutator() throws NotImplementedError today; the credential check
-    //     runs FIRST so missing creds surface as a credentials error. Both fire on
-    //     a dry-run too, so a user planning a dynamicLLM run learns it is gated.
+    // (3) DynamicLLM gating: credential fail-fast (real), then the M3 pre-pass.
+    //     The credential check runs FIRST so missing creds surface as a
+    //     credentials error before any provider is constructed.
+    let costSnapshot = { totalUsd: 0, calls: 0 };
+    let llmMap: LlmMutatorMap | undefined;
     if (plan.gate.runDynamicLLM) {
         assertLlmCredentials(config);
-        // M3 replaces this throw with: pre-pass → precomputed map → push an
-        // `llm/<tag>` LLMMutator into `plan.injectedMutators`.
-        buildLlmMutator(config);
+        // Construct the provider, wrap it with cache + cost + budget enforcement,
+        // read the mutate-glob sources, and run the async pre-pass → precomputed
+        // map → ONE injected `llm` LLMMutator (the seam invariant: all LLM work is
+        // the pre-pass; the injected mutator is synchronous).
+        const cost = new CostAccumulator();
+        const cache = new ResponseCache(resolve(plan.projectDir, config.cacheDir));
+        const provider = createBudgetedProvider(createProvider(config), {
+            cache,
+            cost,
+            maxCostUsd: config.dynamicLLM.budget.maxCostUsd,
+            maxLlmCallsPerRun: config.dynamicLLM.budget.maxLlmCallsPerRun,
+            defaultModel: config.model,
+            log,
+        });
+        const files = await readMutateSources(plan);
+        const built = await buildLlmMutator(config, {
+            provider,
+            costAccumulator: cost,
+            files,
+            cwd: resolve(plan.projectDir),
+            log,
+        });
+        plan.injectedMutators.push(built.mutator);
+        costSnapshot = built.costSnapshot;
+        llmMap = built.map;
+        log(
+            `stryker-llm: LLM pre-pass cost $${costSnapshot.totalUsd.toFixed(2)} / ` +
+                `${String(costSnapshot.calls)} calls`,
+        );
     }
 
     // DRY-RUN: never construct Stryker (no child procs, sandbox-safe).
@@ -129,5 +168,105 @@ export async function runLlmMutation(
     const results = await stryker.runMutationTest();
 
     log(`stryker-llm: completed with ${String(results.length)} mutant result(s).`);
+
+    // (7) M4 reporter: our survivor view + cost summary on top of Stryker's
+    //     standard report (also called on the heuristics-only path — cost is 0).
+    const enrichment = llmMap === undefined ? undefined : correlateEnrichment(results, llmMap);
+    const report = formatReport(
+        results,
+        costSnapshot,
+        enrichment === undefined ? {} : { enrichment },
+    );
+    log(report.survivorsText);
+    log(report.summaryText);
+    await writeFilteredReport(plan, report);
+
     return { plan, results };
+}
+
+/**
+ * Read the source files Stryker will mutate (the `mutate` glob set), so the
+ * pre-pass can target them. Node-only (filesystem); reuses the resolved `mutate`
+ * globs, falling back to `src/**` TS. Returns absolute fileNames + content so the
+ * pure pre-pass stays independent of glob mechanics.
+ */
+async function readMutateSources(plan: RunPlan): Promise<SourceFileInput[]> {
+    const projectDir = resolve(plan.projectDir);
+    const patterns =
+        plan.strykerOptions.mutate !== undefined && plan.strykerOptions.mutate.length > 0
+            ? plan.strykerOptions.mutate
+            : ['src/**/*.ts'];
+
+    const seen = new Set<string>();
+    const files: SourceFileInput[] = [];
+    for (const pattern of patterns) {
+        const glob = new Glob(pattern);
+        // oxlint-disable-next-line no-await-in-loop -- sequential glob scans accumulate into one set; the volume is small (one or a few patterns).
+        for await (const match of glob.scan({ cwd: projectDir, absolute: true })) {
+            if (seen.has(match)) {
+                continue;
+            }
+            seen.add(match);
+            // oxlint-disable-next-line no-await-in-loop -- reading discovered files; bounded by the mutate glob set.
+            const content = await readFile(match, 'utf8');
+            files.push({ fileName: match, content });
+        }
+    }
+    return files;
+}
+
+/**
+ * Build the reporter's id→enrichment side-table by correlating each LLM
+ * `MutantResult` back to its precomputed-map entry via location. Stryker assigns
+ * mutant ids at instrument time (unknown to the pre-pass), so post-run
+ * correlation by `(fileName, location)` is the only way to recover the per-
+ * candidate `llm/<tag>` + original + rationale for OUR survivor view.
+ *
+ * LOCATION CONVERSION: the map's locKey is babel (1-based line / 0-based column);
+ * `MutantResult.location` is the schema's 1-based line AND 1-based column, so the
+ * babel column = `location.column - 1`. When a span carries multiple candidates
+ * we cannot tell which result is which (Stryker collapses per-candidate identity),
+ * so we attach the FIRST entry's metadata — coarse but honest; the filtered
+ * artifact still lists every candidate.
+ */
+function correlateEnrichment(
+    results: readonly MutantResult[],
+    map: LlmMutatorMap,
+): Map<string, MutantEnrichment> {
+    const enrichment = new Map<string, MutantEnrichment>();
+    for (const result of results) {
+        if (result.mutatorName !== LLM_MUTATOR_NAME) {
+            continue;
+        }
+        const byLoc = map.get(result.fileName);
+        if (byLoc === undefined) {
+            continue;
+        }
+        const loc = result.location;
+        const key = locKeyFromBabelLoc({
+            start: { line: loc.start.line, column: loc.start.column - 1 },
+            end: { line: loc.end.line, column: loc.end.column - 1 },
+        });
+        const entries = byLoc.get(key);
+        const entry = entries?.[0];
+        if (entry === undefined) {
+            continue;
+        }
+        const tag = entry.mutatorName.startsWith('llm/')
+            ? entry.mutatorName.slice('llm/'.length)
+            : undefined;
+        enrichment.set(result.id, {
+            ...(entry.original === undefined ? {} : { original: entry.original }),
+            ...(tag === undefined ? {} : { tag }),
+            ...(entry.rationale === undefined ? {} : { rationale: entry.rationale }),
+        });
+    }
+    return enrichment;
+}
+
+/** Write the filtered our-mutants-only artifact to `reports/mutation-llm.json`. */
+async function writeFilteredReport(plan: RunPlan, report: ReportOutput): Promise<void> {
+    const outPath = resolve(plan.projectDir, 'reports', 'mutation-llm.json');
+    await mkdir(dirname(outPath), { recursive: true });
+    await writeFile(outPath, `${JSON.stringify(report.filtered, null, 2)}\n`, 'utf8');
 }

@@ -87,18 +87,66 @@ export {
 } from './seam/index';
 
 // ── Stage-2 pipeline: propose + deterministic filters (§4.3) ────────────────
+// ── + M3 dynamic-LLM pre-pass: targeting, near-equivalence, map-builder,
+//      pre-pass orchestration, budget wrapper (§4 Gates 1–4) ─────────────────
 export {
     applyFilters,
+    type BabelLoc,
+    type BudgetedProviderOptions,
+    BudgetExceededError,
+    type BudgetLogger,
+    type BuildLlmMutatorMapResult,
+    buildLlmMutatorMap,
+    type BuildProposeTargetsOptions,
+    type BuildProposeTargetsResult,
+    buildProposeTargets,
+    type CoverageLookup,
+    createBudgetedProvider,
     dedupKey,
     dedupReplacements,
+    type DropLogger,
+    type DroppedReplacement,
     filterIdentical,
+    filterNearEquivalent,
+    type FilterNearEquivalentOptions,
     filterUnparseable,
+    isLlmWorthy,
+    isNearEquivalent,
     isParseable,
+    type LlmMutatorMap,
+    locKeyFromBabelLoc,
+    locKeyFromRange,
+    type ParsedEntry,
+    parseReplacementFragment,
+    type PrePassLogger,
+    type PrePassStopReason,
     propose,
     PROPOSE_MUTATOR_PREFIX,
     type ProposeOptions,
     type ProposeTarget,
+    RICHNESS_BOOST,
+    RICHNESS_THRESHOLD,
+    RISK_WEIGHTS,
+    RollingYield,
+    runPrePass,
+    type RunPrePassDeps,
+    type RunPrePassResult,
+    type SourceFileInput,
+    type TargetLogger,
+    type TargetMeta,
 } from './pipeline/index';
+
+// ── M4 reporter: survivor view + cost summary + filtered artifact (§6) ───────
+export {
+    type FilteredMutant,
+    type FilteredReport,
+    type FormatReportOptions,
+    formatReport,
+    isOurMutant,
+    LLM_PREFIX,
+    type MutantEnrichment,
+    type ReportOutput,
+} from './report/index';
 
 // ── Heuristic mutators + monkeypatch injection seam (§3.1.3 / §3.3) ──────────
 //
@@ -108,9 +156,12 @@ export {
 // can both reach them from the package root.
 export {
     boundaryOffByOneMutator,
+    createLlmMutator,
     fallbackOperandSubstitutionMutator,
     heuristicMutators,
+    LLM_MUTATOR_NAME,
     type NodeMutator,
+    type NodePath,
     numberLiteralValueMutator,
 } from './mutators/index';
 export { injectMutators, type InjectMutatorsOptions, type InjectMutatorsResult } from './injection';
@@ -129,6 +180,8 @@ export { injectMutators, type InjectMutatorsOptions, type InjectMutatorsResult }
 export {
     assertLlmCredentials,
     buildLlmMutator,
+    type BuildLlmMutatorDeps,
+    type BuildLlmMutatorResult,
     buildRunPlan,
     type GatePlan,
     gateSwitches,
