@@ -14,14 +14,19 @@
  * §4.1 mockability constraint). Callers never branch on whether the provider is
  * agentic or one-shot.
  *
- * The model is handed exactly the source text of the target span plus enough
- * file context to reason, and is asked to return candidates whose `original`
- * echoes the span text verbatim. We do NOT trust the model to invent source
- * positions: the resulting {@link Replacement.range} is always the caller-
- * supplied span (the unit we asked the model to mutate), keeping positions
- * precise and Babel-derived rather than string-searched (development-plan §4.2).
+ * The model is handed exactly the source text of the ENCLOSING FUNCTION (Gate 3
+ * batches by function) plus enough context to reason, and is asked to identify
+ * the SPECIFIC small sub-expression it mutates — echoing that sub-expression's
+ * exact verbatim source as `original`. We do NOT trust the model to invent source
+ * positions: the resulting {@link Replacement.range} is derived from OUR OWN parse
+ * by locating + node-aligning that `original` substring inside the function
+ * (`./range-align`). A candidate whose `original` cannot be located + aligned to a
+ * real EXPRESSION node is DROPPED (Stryker's expression placer would reject a
+ * mis-aligned range anyway — functional-architecture §4 Gate 4 / §5 constraint 3).
  */
 
+import { type AlignDropReason, alignCandidateRange } from './range-align';
+import type { DroppedReplacement } from './llm-map';
 import type { JsonSchema, LLMProvider, ProviderResult } from '../llm/types';
 import type { Replacement, SourceRange } from '../seam/types';
 
@@ -34,18 +39,26 @@ import type { Replacement, SourceRange } from '../seam/types';
 export const PROPOSE_MUTATOR_PREFIX = 'llm';
 
 /**
- * A target span the propose stage operates on: the exact source text of a
- * function or sub-expression chosen by stage-1 risk targeting (or hand-picked
- * in the phase-2 vertical slice), plus the precise {@link SourceRange} that text
- * occupies in `fileName`. `range` is in Stryker's zero-based convention and is
- * passed straight through onto every produced {@link Replacement}.
+ * A target the propose stage operates on: the exact source text of an ENCLOSING
+ * FUNCTION chosen by stage-1 risk targeting (Gate 3 batches by function, ONE
+ * provider.generate() per function), plus the function's 0-based {@link SourceRange}
+ * in `fileName`. `range`/`spanText` describe the WHOLE function (what the model
+ * reads); each candidate's TRUE per-edit range is derived later by locating +
+ * node-aligning the candidate's sub-expression `original` inside the function.
+ *
+ * To node-align, propose needs the FULL file content and the function's ABSOLUTE
+ * char offsets ({@link fileContent}/{@link spanStartOffset}/{@link spanEndOffset});
+ * the targeting stage populates them (it already parses the file and knows each
+ * function node's `start`/`end`). They are OPTIONAL for backward-compat — when
+ * absent, propose falls back to `spanText` as the function source and offset 0,
+ * which still aligns correctly for a single-function `spanText`.
  */
 export interface ProposeTarget {
     /** Path of the file the span lives in. Flows onto `Replacement.fileName`. */
     fileName: string;
-    /** The precise, 0-based span the candidates replace. Flows onto `Replacement.range`. */
+    /** The enclosing function's 0-based Stryker range (used only as a fallback). */
     range: SourceRange;
-    /** The exact source text currently occupying `range`. Flows onto `Replacement.original`. */
+    /** The enclosing function's source text the model reads + mutates within. */
     spanText: string;
     /**
      * Optional surrounding file context (e.g. the enclosing function or whole
@@ -53,6 +66,21 @@ export interface ProposeTarget {
      * grounding only; never used to derive positions.
      */
     context?: string;
+    /**
+     * The FULL file source — used to node-align each candidate's sub-expression.
+     * Defaults to {@link spanText} (so a standalone single-function span aligns).
+     */
+    fileContent?: string;
+    /**
+     * The enclosing function's absolute char START offset in {@link fileContent}.
+     * Defaults to 0 (the start of `spanText` when `fileContent` is omitted).
+     */
+    spanStartOffset?: number;
+    /**
+     * The enclosing function's absolute char END offset in {@link fileContent}
+     * (exclusive). Defaults to the length of the resolved file source.
+     */
+    spanEndOffset?: number;
 }
 
 /**
@@ -79,10 +107,11 @@ export interface ProposeOptions {
 const DEFAULT_MAX_CANDIDATES = 8;
 
 /**
- * One raw candidate as the model is asked to emit it. `original` MUST echo the
- * span text so we can sanity-check the model mutated what we asked; `replacement`
- * is the proposed new text; `mutatorTag` is a short kebab label; `rationale`
- * explains why the edit is an interesting, real-bug-like mutant.
+ * One raw candidate as the model is asked to emit it. `original` is now the EXACT
+ * verbatim source of the SMALL sub-expression the model chose to mutate (it MUST
+ * appear verbatim in the function text so we can locate + node-align it);
+ * `replacement` is the edited sub-expression; `mutatorTag` is a short kebab label;
+ * `rationale` explains why the edit is an interesting, real-bug-like mutant.
  */
 interface RawCandidate {
     original: string;
@@ -119,12 +148,12 @@ function buildProposeSchema(maxCandidates: number): JsonSchema {
                         original: {
                             type: 'string',
                             description:
-                                'The exact source text of the target span, echoed verbatim from the SPAN block.',
+                                'The EXACT verbatim source of a SMALL, self-contained sub-expression you chose to mutate. It MUST appear verbatim (character-for-character) somewhere inside the FUNCTION block, and must be a single complete expression (e.g. "hour >= 12", "a ?? b", "items[i + 1]") — NOT the whole function and NOT a statement.',
                         },
                         replacement: {
                             type: 'string',
                             description:
-                                'The proposed replacement source for the span. Must be syntactically valid and differ from original.',
+                                'The edited sub-expression that replaces "original" in place. Must be a syntactically valid expression, differ from original, and be valid where "original" sits.',
                         },
                         mutatorTag: {
                             type: 'string',
@@ -143,34 +172,39 @@ function buildProposeSchema(maxCandidates: number): JsonSchema {
     };
 }
 
-/** The system prompt: fixed instructions independent of the specific span. */
+/** The system prompt: fixed instructions independent of the specific function. */
 const PROPOSE_SYSTEM = [
     'You are a mutation-testing assistant for JavaScript/TypeScript.',
-    'You are given the exact source text of ONE span (a function or sub-expression) and surrounding context.',
-    'Propose localized, behavior-changing mutations of THAT span only.',
-    'Each mutation must:',
-    '- change the runtime behavior in a way a good test should catch (not a no-op, not a formatting/comment change);',
-    '- be a plausible real bug a developer might write (off-by-one, flipped condition, wrong operator, swapped argument, dropped guard, wrong boundary literal, etc.);',
-    '- stay inside the span: replace the whole span text with a syntactically valid edited version;',
-    '- echo the span text verbatim in "original" and put the edited span in "replacement".',
-    'Do NOT propose semantically-equivalent rewrites. Do NOT change identifiers that are not part of the behavior.',
+    'You are given the exact source text of ONE function and surrounding context.',
+    'Propose localized, behavior-changing mutations, each targeting a SMALL, SELF-CONTAINED sub-expression WITHIN the function.',
+    'For EACH mutation:',
+    '- pick a single small sub-expression inside the function (e.g. "hour >= 12", "a ?? b", "len - 1", "items[i + 1]") — NOT the whole function, NOT a statement;',
+    '- put that sub-expression\'s EXACT verbatim source (character-for-character, as it appears in the function) in "original" — it MUST appear verbatim in the function text;',
+    '- put the edited sub-expression in "replacement", keeping it a syntactically valid expression that is valid IN PLACE where "original" sits;',
+    '- ensure both "original" and "replacement" are syntactically valid in place, and that the change alters runtime behavior a good test should catch;',
+    '- prefer plausible real bugs (off-by-one, flipped condition, wrong operator, swapped argument, dropped guard, wrong boundary literal, etc.).',
+    'Do NOT propose semantically-equivalent rewrites. Do NOT change identifiers that are not part of the behavior. Do NOT echo the whole function.',
     'Return ONLY the structured object; no prose outside it.',
 ].join('\n');
 
-/** Build the per-span user prompt embedding the span text and context. */
+/** Build the per-function user prompt embedding the function text and context. */
 function buildProposePrompt(target: ProposeTarget, maxCandidates: number): string {
     const parts = [
-        `Propose up to ${maxCandidates} distinct, behavior-changing mutations for the SPAN below.`,
+        `Propose up to ${maxCandidates} distinct, behavior-changing mutations, each on a small sub-expression WITHIN the FUNCTION below.`,
         '',
-        'SPAN (mutate exactly this text; echo it verbatim as "original"):',
+        'FUNCTION (mutate sub-expressions inside this; "original" must be a verbatim substring of it):',
         '```',
         target.spanText,
         '```',
     ];
-    if (target.context !== undefined && target.context.length > 0) {
+    if (
+        target.context !== undefined &&
+        target.context.length > 0 &&
+        target.context !== target.spanText
+    ) {
         parts.push(
             '',
-            'CONTEXT (for understanding only; do NOT mutate outside the SPAN):',
+            'CONTEXT (for understanding only; do NOT mutate outside the FUNCTION):',
             '```',
             target.context,
             '```',
@@ -179,20 +213,72 @@ function buildProposePrompt(target: ProposeTarget, maxCandidates: number): strin
     return parts.join('\n');
 }
 
+/** The seam-ready replacements + the candidates dropped during node-alignment. */
+export interface ProposeResult {
+    /** Node-aligned, seam-ready replacements (each range = a real EXPRESSION node). */
+    replacements: Replacement[];
+    /** Candidates dropped because their `original` could not be node-aligned. */
+    dropped: DroppedReplacement[];
+}
+
+/** Human-readable reason text per align-drop reason, for the run's drop log. */
+const ALIGN_DROP_REASON_TEXT: Record<AlignDropReason, string> = {
+    'not-found': 'sub-expression "original" not found verbatim in the enclosing function',
+    ambiguous: 'sub-expression "original" appears more than once in the function (ambiguous)',
+    'non-node-aligned':
+        'sub-expression "original" does not align exactly to a single AST node (crosses node boundaries)',
+    'not-an-expression':
+        'sub-expression "original" aligns to a non-expression (statement-shaped) node',
+};
+
 /**
- * Map one validated {@link RawCandidate} onto a seam-ready {@link Replacement}.
- * The `range` is the caller's span (never model-derived); `original` is the
- * caller's span text (authoritative), not the model's echo, so a sloppy echo
- * cannot corrupt the audit field or the later `replacement === original` filter.
+ * Resolve the file source + function offsets a target uses for node-alignment.
+ * When the targeting stage supplied `fileContent`/`spanStartOffset`/
+ * `spanEndOffset` they are used verbatim; otherwise we fall back to treating
+ * `spanText` as a standalone file starting at offset 0 (the backward-compat path
+ * for hand-built targets and existing tests).
  */
-function toReplacement(target: ProposeTarget, candidate: RawCandidate): Replacement {
+function resolveAlignInputs(target: ProposeTarget): {
+    fileContent: string;
+    start: number;
+    end: number;
+} {
+    const fileContent = target.fileContent ?? target.spanText;
+    const start = target.spanStartOffset ?? 0;
+    const end = target.spanEndOffset ?? fileContent.length;
+    return { fileContent, start, end };
+}
+
+/**
+ * Map one validated {@link RawCandidate} onto a seam-ready {@link Replacement} by
+ * NODE-ALIGNING its sub-expression `original` (never model-derived coordinates).
+ * On a successful alignment the `range` is the aligned EXPRESSION node's range and
+ * `original` is the verbatim sub-expression; on failure the candidate is dropped
+ * with a typed reason (the four §4 Gate 4 conditions). Returns the `Replacement`
+ * or the `DroppedReplacement` describing the drop.
+ */
+function toReplacement(
+    target: ProposeTarget,
+    candidate: RawCandidate,
+): Replacement | DroppedReplacement {
     const tag = candidate.mutatorTag.trim();
     const mutatorName =
         tag.length > 0 ? `${PROPOSE_MUTATOR_PREFIX}/${tag}` : PROPOSE_MUTATOR_PREFIX;
+
+    const { fileContent, start, end } = resolveAlignInputs(target);
+    const aligned = alignCandidateRange(fileContent, start, end, candidate.original);
+    if ('dropped' in aligned) {
+        return {
+            fileName: target.fileName,
+            range: target.range,
+            replacement: candidate.replacement,
+            reason: `node-alignment drop (${aligned.reason}): ${ALIGN_DROP_REASON_TEXT[aligned.reason]}`,
+        };
+    }
     return {
         fileName: target.fileName,
-        range: target.range,
-        original: target.spanText,
+        range: aligned.range,
+        original: aligned.original,
         replacement: candidate.replacement,
         mutatorName,
         rationale: candidate.rationale,
@@ -200,29 +286,34 @@ function toReplacement(target: ProposeTarget, candidate: RawCandidate): Replacem
 }
 
 /**
- * Ask the injected provider for behavior-changing mutation candidates for a
- * single span and return them as seam-ready {@link Replacement}s.
+ * Ask the injected provider for behavior-changing mutation candidates for one
+ * ENCLOSING FUNCTION and return them as NODE-ALIGNED, seam-ready
+ * {@link Replacement}s plus the candidates dropped during alignment.
  *
- * This performs NO filtering beyond truncating to `maxCandidates` — parse-check,
- * `replacement === original` rejection, and dedup are the job of `./filters`,
- * which this stage's output feeds into. The provider has already validated the
- * response against the JSON schema, so `value.candidates` is trusted to be
- * structurally well-formed.
+ * Each candidate's sub-expression `original` is located + node-aligned inside the
+ * function (`./range-align`) so its `range` equals a REAL EXPRESSION node — the
+ * invariant the map-builder + `LLMMutator` + Stryker's expression placer require.
+ * Candidates that fail alignment (not-found / ambiguous / non-node-aligned /
+ * not-an-expression) are returned in `dropped` (NOT emitted). Beyond alignment
+ * this performs NO filtering except truncating to `maxCandidates` — parse-check,
+ * `replacement === original` rejection, dedup, and near-equivalence are the job of
+ * `./filters` + `./near-equivalence`, which this stage's output feeds into. The
+ * provider has already validated the response against the JSON schema.
  *
  * Rejects (propagates the provider's `Error`) on transport/auth failure, abort,
  * or a terminal schema-validation failure — the provider contract guarantees it
  * only resolves with schema-valid output (development-plan §4.1).
  *
  * @param provider DI'd LLM provider (mock in tests; never imported concretely).
- * @param target   The span to mutate plus its precise seam range.
+ * @param target   The enclosing function to mutate within, plus alignment inputs.
  * @param options  Budget cap, model/cache/abort forwarding.
- * @returns The proposed replacements, at most `maxCandidates` of them.
+ * @returns The node-aligned replacements (≤ `maxCandidates`) and the align-drops.
  */
 export async function propose(
     provider: LLMProvider,
     target: ProposeTarget,
     options: ProposeOptions = {},
-): Promise<Replacement[]> {
+): Promise<ProposeResult> {
     const maxCandidates = options.maxCandidates ?? DEFAULT_MAX_CANDIDATES;
     const schema = buildProposeSchema(maxCandidates);
     const prompt = buildProposePrompt(target, maxCandidates);
@@ -237,5 +328,15 @@ export async function propose(
     });
 
     const candidates = result.value.candidates.slice(0, maxCandidates);
-    return candidates.map(candidate => toReplacement(target, candidate));
+    const replacements: Replacement[] = [];
+    const dropped: DroppedReplacement[] = [];
+    for (const candidate of candidates) {
+        const mapped = toReplacement(target, candidate);
+        if ('reason' in mapped) {
+            dropped.push(mapped);
+        } else {
+            replacements.push(mapped);
+        }
+    }
+    return { replacements, dropped };
 }

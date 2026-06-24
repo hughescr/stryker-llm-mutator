@@ -26,7 +26,7 @@
 import { applyFilters, dedupKey } from './filters';
 import { type DropLogger, filterNearEquivalent } from './near-equivalence';
 import { type DroppedReplacement } from './llm-map';
-import { propose, type ProposeTarget } from './propose';
+import { propose, type ProposeResult, type ProposeTarget } from './propose';
 import { BudgetExceededError } from './budgeted-provider';
 import type { CostAccumulator, CostSnapshot, LLMProvider } from '../llm/index';
 import type { LlmMutatorConfig } from '../config';
@@ -161,14 +161,21 @@ export async function runPrePass(
     for (const target of targets) {
         try {
             // oxlint-disable-next-line no-await-in-loop -- sequential by design: the budgeted provider checks the ceiling BETWEEN calls, and diminishing-returns is evaluated per call.
-            const raw = await propose(provider, target, {
+            const proposed: ProposeResult = await propose(provider, target, {
                 maxCandidates: budget.maxCandidatesPerFile,
                 model: config.model,
                 ...(signal === undefined ? {} : { signal }),
             });
             callsIssued += 1;
 
-            const filtered = filterCall(raw, log);
+            // Node-alignment drops (not-found / ambiguous / non-node-aligned /
+            // not-an-expression) join the run's drop log alongside near-equiv drops.
+            dropped.push(...proposed.dropped);
+            for (const drop of proposed.dropped) {
+                log?.(`node-alignment drop ${drop.fileName}: ${drop.reason}`);
+            }
+
+            const filtered = filterCall(proposed.replacements, log);
             dropped.push(...filtered.dropped);
 
             let newThisCall = 0;

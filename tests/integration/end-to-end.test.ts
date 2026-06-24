@@ -34,12 +34,18 @@ const FIXTURE_SOURCE = `export function add(a: number, b: number): number {\n   
 const FIXTURE_TEST = `import { test, expect } from 'bun:test';\nimport { add } from './add.ts';\ntest('add pins behaviour', () => {\n    expect(add(2, 3)).toBe(5);\n});\n`;
 
 const SPAN_TEXT = 'a + b';
-// `a + b` on line index 1 (Stryker zero-based), columns [11, 16).
+// Under the node-aligned contract `spanText` is the ENCLOSING FUNCTION and the
+// candidate's sub-expression `a + b` is located + node-aligned inside it; the
+// derived range is the `a + b` BinaryExpression node — line index 1 (Stryker
+// zero-based), columns [11, 16).
 const TARGET: ProposeTarget = {
     fileName: FIXTURE_NAME,
-    range: { start: { line: 1, column: 11 }, end: { line: 1, column: 16 } },
-    spanText: SPAN_TEXT,
+    range: { start: { line: 0, column: 0 }, end: { line: 2, column: 1 } },
+    spanText: FIXTURE_SOURCE,
     context: FIXTURE_SOURCE,
+    fileContent: FIXTURE_SOURCE,
+    spanStartOffset: 0,
+    spanEndOffset: FIXTURE_SOURCE.length,
 };
 
 const SOURCE_FILES: SourceFile[] = [{ name: FIXTURE_NAME, content: FIXTURE_SOURCE }];
@@ -62,11 +68,16 @@ describe('end-to-end offline slice (mock provider)', () => {
         ]);
 
         const proposed = await propose(provider, TARGET);
-        expect(proposed).toHaveLength(1);
+        expect(proposed.replacements).toHaveLength(1);
         // propose() tags LLM mutants distinctly from built-ins (§4.4).
-        expect(proposed[0]!.mutatorName).toBe('llm/arithmetic-swap');
+        expect(proposed.replacements[0]!.mutatorName).toBe('llm/arithmetic-swap');
+        // The aligned range is the `a + b` sub-expression node, not the function.
+        expect(proposed.replacements[0]!.range).toEqual({
+            start: { line: 1, column: 11 },
+            end: { line: 1, column: 16 },
+        });
 
-        const edits = applyFilters(proposed);
+        const edits = applyFilters(proposed.replacements);
         expect(edits).toHaveLength(1);
 
         const { files, mutants } = await instrument(SOURCE_FILES, edits);
@@ -101,8 +112,8 @@ describe('end-to-end offline slice (mock provider)', () => {
         ]);
 
         const proposed = await propose(provider, TARGET);
-        expect(proposed).toHaveLength(2);
-        const edits = applyFilters(proposed);
+        expect(proposed.replacements).toHaveLength(2);
+        const edits = applyFilters(proposed.replacements);
         expect(edits).toHaveLength(2);
 
         const { files, mutants } = await instrument(SOURCE_FILES, edits);
@@ -133,7 +144,7 @@ describe('end-to-end offline slice (mock provider)', () => {
         ]);
 
         const proposed = await propose(provider, TARGET);
-        const edits = applyFilters(proposed);
+        const edits = applyFilters(proposed.replacements);
         expect(edits).toHaveLength(1);
 
         const { files, mutants } = await instrument(SOURCE_FILES, edits);
@@ -157,8 +168,8 @@ describe('end-to-end offline slice (mock provider)', () => {
         ]);
 
         const proposed = await propose(provider, TARGET);
-        expect(proposed).toHaveLength(1);
-        const edits = applyFilters(proposed);
+        expect(proposed.replacements).toHaveLength(1);
+        const edits = applyFilters(proposed.replacements);
         expect(edits).toHaveLength(0);
     });
 });

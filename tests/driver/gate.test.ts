@@ -152,8 +152,12 @@ function classify(items, threshold) {
                 responder: () => ({
                     candidates: [
                         {
-                            original: RICH_FN,
-                            replacement: 'count - 1',
+                            // A SUB-EXPRESSION inside classify (node-aligned), NOT
+                            // the whole function — this is the contract the fix
+                            // enforces so an expression edit replaces an expression
+                            // node and the map is non-empty.
+                            original: 'count >= 2',
+                            replacement: 'count > 2',
                             mutatorTag: 'off-by-one',
                             rationale: 'boundary',
                         },

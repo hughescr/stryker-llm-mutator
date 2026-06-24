@@ -34,14 +34,11 @@
  */
 
 import { parse } from '@babel/parser';
-import type { Node } from '@babel/types';
 
+import { type AnyNode, BABEL_PLUGINS, childNodes, isNode, toStrykerRange } from './babel-walk';
 import type { LlmMutatorConfig } from '../config';
 import type { ProposeTarget } from './propose';
 import type { SourceRange } from '../seam/types';
-
-/** Babel plugins enabling the TS + JSX superset the instrumenter also parses. */
-const BABEL_PLUGINS = ['typescript', 'jsx'] as const;
 
 /** Risk-formula weights (functional-architecture §4 Gate 1). Exported for tests. */
 export const RISK_WEIGHTS = {
@@ -162,60 +159,6 @@ const OFF_BY_ONE_METHODS = new Set([
     'padEnd',
     'repeat',
 ]);
-
-/**
- * A Babel position is `{ line (1-based), column (0-based) }`; a node carries an
- * optional `loc`. We narrow to the slice we read.
- */
-interface BabelLocSlice {
-    start: { line: number; column: number };
-    end: { line: number; column: number };
-}
-
-/** A node with the structural fields the traversal inspects. */
-type AnyNode = Node & {
-    loc?: BabelLocSlice | null;
-    [key: string]: unknown;
-};
-
-/** Convert a 1-based Babel `loc` to a 0-based Stryker {@link SourceRange}. */
-function toStrykerRange(loc: BabelLocSlice): SourceRange {
-    return {
-        start: { line: loc.start.line - 1, column: loc.start.column },
-        end: { line: loc.end.line - 1, column: loc.end.column },
-    };
-}
-
-/** True for an AST node object (has a string `type`). */
-function isNode(value: unknown): value is AnyNode {
-    return (
-        value !== null &&
-        typeof value === 'object' &&
-        typeof (value as { type?: unknown }).type === 'string'
-    );
-}
-
-/**
- * Yield each direct child node (or node in a child array) of `node`.
- * @yields each direct child AST node, skipping non-node fields (loc/type/extra).
- */
-function* childNodes(node: AnyNode): Generator<AnyNode> {
-    for (const key of Object.keys(node)) {
-        if (key === 'loc' || key === 'type' || key === 'extra') {
-            continue;
-        }
-        const value = node[key];
-        if (Array.isArray(value)) {
-            for (const item of value) {
-                if (isNode(item)) {
-                    yield item;
-                }
-            }
-        } else if (isNode(value)) {
-            yield value;
-        }
-    }
-}
 
 /** The per-function accumulators built during the subtree walk. */
 interface FunctionScore {
@@ -375,23 +318,68 @@ function isDisabled(node: AnyNode, disabled: DisabledRanges): boolean {
 }
 
 /**
- * Find the source-offset ranges of `// Stryker disable` directives. A line/block
- * comment containing `Stryker disable` disables from the comment to end-of-file
- * (Stryker's bookkeeper is line-scoped, but for the ignoredDensity DEPRIORITIZE
- * signal a coarse "from here on" is a safe over-count — it only lowers risk).
+ * Compute the source-offset span of the line FOLLOWING a comment that ends at
+ * `commentEnd`. We skip from the comment's end to the next newline (the comment's
+ * own line break), then return `[lineStart, lineEnd)` of the line after it —
+ * `lineEnd` being the next newline or end-of-file. If the comment is the last
+ * thing in the file (no following line), the span is empty (`start === end`),
+ * which contains no node.
  */
-function findDisabledRanges(comments: AnyNode[], sourceLength: number): DisabledRanges {
+function nextLineSpan(content: string, commentEnd: number): { start: number; end: number } {
+    const afterComment = content.indexOf('\n', commentEnd);
+    if (afterComment === -1) {
+        return { start: content.length, end: content.length };
+    }
+    const lineStart = afterComment + 1;
+    const lineBreak = content.indexOf('\n', lineStart);
+    const lineEnd = lineBreak === -1 ? content.length : lineBreak;
+    return { start: lineStart, end: lineEnd };
+}
+
+/**
+ * Find the source-offset ranges disabled by `// Stryker disable` directives,
+ * honoring each directive's SCOPE (Stryker's directives are scoped, never
+ * file-wide):
+ *
+ * - `Stryker disable next-line …` disables ONLY the next source line — the span
+ *   is that one line, computed from the comment's end offset and the content.
+ * - `Stryker disable …` (block form, no `next-line`) disables from the comment
+ *   until the next matching block `Stryker restore …`, or to end-of-file if none
+ *   follows.
+ * - `Stryker restore …` (block form, no `next-line`) closes an open block.
+ *
+ * We do NOT track which mutator names a directive lists: for the ignoredDensity
+ * DEPRIORITIZE signal any disable covering a node counts it as ignored. The
+ * comments arrive in source order (`@babel/parser` emits them that way).
+ */
+function findDisabledRanges(
+    comments: AnyNode[],
+    content: string,
+    sourceLength: number,
+): DisabledRanges {
     const ranges: DisabledRanges = [];
+    let blockStart: number | undefined;
     for (const comment of comments) {
         const value = (comment as { value?: string }).value;
         const start = (comment as { start?: number }).start;
-        if (
-            typeof value === 'string' &&
-            value.includes('Stryker disable') &&
-            typeof start === 'number'
-        ) {
-            ranges.push({ start, end: sourceLength });
+        const end = (comment as { end?: number }).end;
+        if (typeof value !== 'string') {
+            continue;
         }
+        const isNextLine = value.includes('next-line');
+        if (value.includes('Stryker disable')) {
+            if (isNextLine && typeof end === 'number') {
+                ranges.push(nextLineSpan(content, end));
+            } else if (!isNextLine && typeof start === 'number' && blockStart === undefined) {
+                blockStart = start;
+            }
+        } else if (value.includes('Stryker restore') && !isNextLine && blockStart !== undefined) {
+            ranges.push({ start: blockStart, end: start ?? sourceLength });
+            blockStart = undefined;
+        }
+    }
+    if (blockStart !== undefined) {
+        ranges.push({ start: blockStart, end: sourceLength });
     }
     return ranges;
 }
@@ -431,6 +419,12 @@ interface FunctionCandidate {
     fileName: string;
     range: SourceRange;
     functionText: string;
+    /** The full file source — threaded onto the target so propose can node-align. */
+    fileContent: string;
+    /** The function's absolute char START offset in `fileContent` ([start, end)). */
+    spanStartOffset: number;
+    /** The function's absolute char END offset in `fileContent` (exclusive). */
+    spanEndOffset: number;
     risk: number;
     semanticRichness: number;
     ev: number;
@@ -476,7 +470,7 @@ function candidatesForFile(
     });
     const program = ast.program as unknown as AnyNode;
     const comments = (ast.comments ?? []) as unknown as AnyNode[];
-    const disabled = findDisabledRanges(comments, file.content.length);
+    const disabled = findDisabledRanges(comments, file.content, file.content.length);
 
     const { minRiskScore, requireCoverage, topSpansPerFile } = config.dynamicLLM.targeting;
     const candidates: FunctionCandidate[] = [];
@@ -498,10 +492,15 @@ function candidatesForFile(
         if (!isLlmWorthy(semanticRichness, score)) {
             continue;
         }
+        const spanStartOffset = (fnNode as { start?: number | null }).start ?? 0;
+        const spanEndOffset = (fnNode as { end?: number | null }).end ?? 0;
         candidates.push({
             fileName: file.fileName,
             range,
             functionText: sliceByOffsets(file.content, fnNode),
+            fileContent: file.content,
+            spanStartOffset,
+            spanEndOffset,
             risk,
             semanticRichness,
             ev: risk * semanticRichness,
@@ -576,6 +575,9 @@ export function buildProposeTargets(
         range: candidate.range,
         spanText: candidate.functionText,
         context: candidate.functionText,
+        fileContent: candidate.fileContent,
+        spanStartOffset: candidate.spanStartOffset,
+        spanEndOffset: candidate.spanEndOffset,
     }));
     const meta: TargetMeta[] = chosen.map(candidate => ({
         fileName: candidate.fileName,

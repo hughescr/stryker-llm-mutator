@@ -32,9 +32,8 @@
  */
 
 import process from 'node:process';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { glob, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
-import { Glob } from 'bun';
 
 import { Stryker } from '@stryker-mutator/core';
 import type { MutantResult, PartialStrykerOptions } from '@stryker-mutator/api/core';
@@ -189,6 +188,14 @@ export async function runLlmMutation(
  * pre-pass can target them. Node-only (filesystem); reuses the resolved `mutate`
  * globs, falling back to `src/**` TS. Returns absolute fileNames + content so the
  * pure pre-pass stays independent of glob mechanics.
+ *
+ * Uses Node 26's `glob` from `node:fs/promises` (an async iterator). It yields
+ * paths RELATIVE to its `cwd` option, so each match is resolved against
+ * `projectDir` to the ABSOLUTE fileName the pre-pass + reporter key on (see the
+ * locKey contract in `src/pipeline/llm-map.ts`). Bun also implements this
+ * `node:fs/promises` `glob`, so the same code runs under both runtimes. Negated
+ * `!`-patterns are not handled (matching the prior Bun behaviour): each pattern
+ * is treated positively.
  */
 async function readMutateSources(plan: RunPlan): Promise<SourceFileInput[]> {
     const projectDir = resolve(plan.projectDir);
@@ -200,16 +207,17 @@ async function readMutateSources(plan: RunPlan): Promise<SourceFileInput[]> {
     const seen = new Set<string>();
     const files: SourceFileInput[] = [];
     for (const pattern of patterns) {
-        const glob = new Glob(pattern);
         // oxlint-disable-next-line no-await-in-loop -- sequential glob scans accumulate into one set; the volume is small (one or a few patterns).
-        for await (const match of glob.scan({ cwd: projectDir, absolute: true })) {
-            if (seen.has(match)) {
+        for await (const match of glob(pattern, { cwd: projectDir })) {
+            // Node yields cwd-relative paths; resolve to the absolute fileName.
+            const absolute = resolve(projectDir, match);
+            if (seen.has(absolute)) {
                 continue;
             }
-            seen.add(match);
+            seen.add(absolute);
             // oxlint-disable-next-line no-await-in-loop -- reading discovered files; bounded by the mutate glob set.
-            const content = await readFile(match, 'utf8');
-            files.push({ fileName: match, content });
+            const content = await readFile(absolute, 'utf8');
+            files.push({ fileName: absolute, content });
         }
     }
     return files;

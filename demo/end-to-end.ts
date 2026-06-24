@@ -62,12 +62,20 @@ const EXAMPLE_NAME = 'add.ts';
 const EXAMPLE_SOURCE = `export function add(a: number, b: number): number {\n    return a + b;\n}\n`;
 const EXAMPLE_TEST = `import { test, expect } from 'bun:test';\nimport { add } from './add.ts';\ntest('add pins behaviour', () => {\n    expect(add(2, 3)).toBe(5);\n});\n`;
 
+// The sub-expression the model targets (`a + b`), echoed verbatim as `original`.
+// Under the node-aligned contract `spanText` is the ENCLOSING FUNCTION and
+// propose locates `a + b` inside it to derive the BinaryExpression node's range.
 const SPAN_TEXT = 'a + b';
 const TARGET: ProposeTarget = {
     fileName: EXAMPLE_NAME,
-    range: { start: { line: 1, column: 11 }, end: { line: 1, column: 16 } },
-    spanText: SPAN_TEXT,
+    // The function's whole-span range (0-based); a fallback only — the per-edit
+    // range is the aligned `a + b` BinaryExpression node.
+    range: { start: { line: 0, column: 0 }, end: { line: 2, column: 1 } },
+    spanText: EXAMPLE_SOURCE,
     context: EXAMPLE_SOURCE,
+    fileContent: EXAMPLE_SOURCE,
+    spanStartOffset: 0,
+    spanEndOffset: EXAMPLE_SOURCE.length,
 };
 
 /**
@@ -138,14 +146,20 @@ async function main(): Promise<void> {
     );
 
     // Stage 2: propose. The provider call's cost is summed for the run report.
+    // Each candidate's sub-expression is node-aligned; alignment drops are returned
+    // alongside the seam-ready replacements.
     const proposed = await propose(provider, TARGET, { maxCandidates: 8 });
 
     // Cheap deterministic filters: drop unparseable / identical / duplicate edits
     // before we pay to instrument and run them (§4.3).
-    const edits = applyFilters(proposed);
+    const edits = applyFilters(proposed.replacements);
 
     // eslint-disable-next-line no-console
-    console.log(`Proposed ${proposed.length} candidate(s); ${edits.length} survived filters.`);
+    console.log(
+        `Proposed ${proposed.replacements.length} candidate(s) ` +
+            `(${proposed.dropped.length} dropped in node-alignment); ` +
+            `${edits.length} survived filters.`,
+    );
 
     const files: SourceFile[] = [{ name: EXAMPLE_NAME, content: EXAMPLE_SOURCE }];
 

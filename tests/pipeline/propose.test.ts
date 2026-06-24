@@ -32,20 +32,33 @@ function makeMockProvider(
     };
 }
 
-const RANGE: SourceRange = {
-    start: { line: 4, column: 8 },
-    end: { line: 4, column: 25 },
-};
+// The enclosing function the model reads. Under the node-aligned contract, the
+// candidate's `original` is a SUB-EXPRESSION (e.g. `a > b ? a : b`) located + node
+// aligned inside this function; the resulting Replacement.range is that
+// sub-expression's node range (NOT the whole function).
+const FUNCTION_SOURCE = 'function max(a: number, b: number) {\n    return a > b ? a : b;\n}';
 
+/** A target carrying the function source + its absolute offsets for alignment. */
 const TARGET: ProposeTarget = {
     fileName: 'src/calc.ts',
-    range: RANGE,
-    spanText: 'a > b ? a : b',
-    context: 'function max(a: number, b: number) {\n    return a > b ? a : b;\n}',
+    // The whole-function range is the fallback only; per-edit ranges are aligned.
+    range: { start: { line: 0, column: 0 }, end: { line: 2, column: 1 } },
+    spanText: FUNCTION_SOURCE,
+    context: FUNCTION_SOURCE,
+    fileContent: FUNCTION_SOURCE,
+    spanStartOffset: 0,
+    spanEndOffset: FUNCTION_SOURCE.length,
 };
 
-describe('propose', () => {
-    it('maps canned schema-valid candidates to seam-ready Replacements', async () => {
+// `a > b ? a : b` is the ConditionalExpression on file line index 1 (0-based);
+// it starts at column 11 (`    return ` is 11 chars) and ends at column 24.
+const TERNARY_RANGE: SourceRange = {
+    start: { line: 1, column: 11 },
+    end: { line: 1, column: 24 },
+};
+
+describe('propose — node-aligned sub-expression contract', () => {
+    it('aligns each candidate to its sub-expression node range (not the function)', async () => {
         const provider = makeMockProvider({
             candidates: [
                 {
@@ -63,36 +76,45 @@ describe('propose', () => {
             ],
         });
 
-        const result = await propose(provider, TARGET);
+        const { replacements, dropped } = await propose(provider, TARGET);
 
-        expect(result).toHaveLength(2);
-        expect(result[0]).toEqual({
+        expect(dropped).toHaveLength(0);
+        expect(replacements).toHaveLength(2);
+        expect(replacements[0]).toEqual({
             fileName: 'src/calc.ts',
-            range: RANGE,
+            range: TERNARY_RANGE,
             original: 'a > b ? a : b',
             replacement: 'a < b ? a : b',
             mutatorName: `${PROPOSE_MUTATOR_PREFIX}/flip-condition`,
             rationale: 'Flipping > to < returns the minimum instead of the maximum.',
         });
-        expect(result[1]?.mutatorName).toBe(`${PROPOSE_MUTATOR_PREFIX}/boundary`);
+        expect(replacements[1]?.mutatorName).toBe(`${PROPOSE_MUTATOR_PREFIX}/boundary`);
+        // The aligned range is the ternary node, NOT the whole-function fallback.
+        expect(replacements[1]?.range).toEqual(TERNARY_RANGE);
     });
 
-    it('uses the caller span text as original, ignoring a sloppy model echo', async () => {
+    it('aligns a SMALLER nested sub-expression to its own node range', async () => {
+        // `a > b` is a BinaryExpression nested inside the ternary; it must align to
+        // its own (tighter) node span, proving exact-node alignment, not the parent.
         const provider = makeMockProvider({
             candidates: [
                 {
-                    original: 'WRONG ECHO',
-                    replacement: 'a + b',
-                    mutatorTag: 'wrong-op',
-                    rationale: 'Replaces the conditional with an addition.',
+                    original: 'a > b',
+                    replacement: 'a < b',
+                    mutatorTag: 'flip',
+                    rationale: 'Flip the comparison.',
                 },
             ],
         });
 
-        const result = await propose(provider, TARGET);
-
-        expect(result[0]?.original).toBe('a > b ? a : b');
-        expect(result[0]?.range).toEqual(RANGE);
+        const { replacements } = await propose(provider, TARGET);
+        expect(replacements).toHaveLength(1);
+        // `a > b` starts at column 11 and ends at column 16.
+        expect(replacements[0]?.range).toEqual({
+            start: { line: 1, column: 11 },
+            end: { line: 1, column: 16 },
+        });
+        expect(replacements[0]?.original).toBe('a > b');
     });
 
     it('falls back to the bare prefix when the model omits a mutatorTag', async () => {
@@ -107,36 +129,44 @@ describe('propose', () => {
             ],
         });
 
-        const result = await propose(provider, TARGET);
+        const { replacements } = await propose(provider, TARGET);
 
-        expect(result[0]?.mutatorName).toBe(PROPOSE_MUTATOR_PREFIX);
+        expect(replacements[0]?.mutatorName).toBe(PROPOSE_MUTATOR_PREFIX);
     });
 
     it('truncates to maxCandidates even when the model over-produces', async () => {
+        // Five distinct, alignable sub-expressions; only the first two are kept.
         const provider = makeMockProvider({
-            candidates: Array.from({ length: 5 }, (_, i) => ({
-                original: 'a > b ? a : b',
-                replacement: `a + ${i}`,
-                mutatorTag: `tag-${i}`,
-                rationale: 'n',
-            })),
+            candidates: [
+                {
+                    original: 'a > b ? a : b',
+                    replacement: 'a < b ? a : b',
+                    mutatorTag: 't0',
+                    rationale: 'n',
+                },
+                { original: 'a > b', replacement: 'a < b', mutatorTag: 't1', rationale: 'n' },
+                { original: 'a', replacement: 'b', mutatorTag: 't2', rationale: 'n' },
+                { original: 'b', replacement: 'a', mutatorTag: 't3', rationale: 'n' },
+                { original: 'a : b', replacement: 'b : a', mutatorTag: 't4', rationale: 'n' },
+            ],
         });
 
-        const result = await propose(provider, TARGET, { maxCandidates: 2 });
+        const { replacements } = await propose(provider, TARGET, { maxCandidates: 2 });
 
-        expect(result).toHaveLength(2);
-        expect(result[1]?.replacement).toBe('a + 1');
+        expect(replacements).toHaveLength(2);
+        expect(replacements[1]?.replacement).toBe('a < b');
     });
 
-    it('returns an empty array when the model proposes nothing', async () => {
+    it('returns empty replacements + drops when the model proposes nothing', async () => {
         const provider = makeMockProvider({ candidates: [] });
 
-        const result = await propose(provider, TARGET);
+        const { replacements, dropped } = await propose(provider, TARGET);
 
-        expect(result).toEqual([]);
+        expect(replacements).toEqual([]);
+        expect(dropped).toEqual([]);
     });
 
-    it('builds a prompt and schema and forwards system/model/cacheKey to the provider', async () => {
+    it('builds a function prompt + schema and forwards system/model/cacheKey', async () => {
         let seen: ProviderRequest | undefined;
         const provider = makeMockProvider(
             { candidates: [] },
@@ -154,8 +184,10 @@ describe('propose', () => {
         });
 
         expect(seen?.prompt).toContain('a > b ? a : b');
+        expect(seen?.prompt).toContain('FUNCTION');
         expect(seen?.prompt).toContain('up to 3');
         expect(seen?.system).toContain('mutation-testing');
+        expect(seen?.system).toContain('sub-expression');
         expect(seen?.model).toBe('claude-opus-4-1');
         expect(seen?.cacheKey).toBe('span-abc');
 
@@ -165,7 +197,7 @@ describe('propose', () => {
         expect(schema.properties.candidates.maxItems).toBe(3);
     });
 
-    it('omits the CONTEXT block from the prompt when no context is given', async () => {
+    it('omits the CONTEXT block when context equals the function source', async () => {
         let seen: ProviderRequest | undefined;
         const provider = makeMockProvider(
             { candidates: [] },
@@ -176,9 +208,44 @@ describe('propose', () => {
             },
         );
 
-        await propose(provider, { fileName: 'f.ts', range: RANGE, spanText: 'x + 1' });
+        // context === spanText (the common targeting output) → no separate CONTEXT.
+        await propose(provider, TARGET);
 
-        expect(seen?.prompt).toContain('x + 1');
+        expect(seen?.prompt).toContain('a > b ? a : b');
+        expect(seen?.prompt).not.toContain('CONTEXT');
+    });
+
+    it('includes a CONTEXT block when context differs from the function source', async () => {
+        let seen: ProviderRequest | undefined;
+        const provider = makeMockProvider(
+            { candidates: [] },
+            {
+                onRequest: r => {
+                    seen = r;
+                },
+            },
+        );
+
+        await propose(provider, { ...TARGET, context: '// surrounding module context' });
+
+        expect(seen?.prompt).toContain('CONTEXT');
+        expect(seen?.prompt).toContain('surrounding module context');
+    });
+
+    it('omits the CONTEXT block when context is undefined', async () => {
+        let seen: ProviderRequest | undefined;
+        const provider = makeMockProvider(
+            { candidates: [] },
+            {
+                onRequest: r => {
+                    seen = r;
+                },
+            },
+        );
+
+        const { context: _ignored, ...noContext } = TARGET;
+        await propose(provider, noContext);
+
         expect(seen?.prompt).not.toContain('CONTEXT');
     });
 
@@ -191,5 +258,125 @@ describe('propose', () => {
         };
 
         await expect(propose(provider, TARGET)).rejects.toThrow('terminal schema failure');
+    });
+});
+
+describe('propose — node-alignment drop conditions', () => {
+    it('DROPS a candidate whose original is not found in the function (not-found)', async () => {
+        const provider = makeMockProvider({
+            candidates: [
+                {
+                    original: 'x + y', // never appears in `max`
+                    replacement: 'x - y',
+                    mutatorTag: 'nope',
+                    rationale: 'n',
+                },
+            ],
+        });
+
+        const { replacements, dropped } = await propose(provider, TARGET);
+
+        expect(replacements).toHaveLength(0);
+        expect(dropped).toHaveLength(1);
+        expect(dropped[0]?.reason).toContain('not-found');
+        expect(dropped[0]?.fileName).toBe('src/calc.ts');
+    });
+
+    it('DROPS a candidate whose original appears more than once (ambiguous)', async () => {
+        // `n` appears twice in the parameter list / nowhere uniquely — use a fn
+        // where `a` appears multiple times so a bare `a` is ambiguous.
+        const fn = 'function f(a) {\n    return a + a;\n}';
+        const target: ProposeTarget = {
+            fileName: 'src/f.ts',
+            range: { start: { line: 0, column: 0 }, end: { line: 2, column: 1 } },
+            spanText: fn,
+            fileContent: fn,
+            spanStartOffset: 0,
+            spanEndOffset: fn.length,
+        };
+        const provider = makeMockProvider({
+            candidates: [{ original: 'a', replacement: 'b', mutatorTag: 'amb', rationale: 'n' }],
+        });
+
+        const { replacements, dropped } = await propose(provider, target);
+
+        expect(replacements).toHaveLength(0);
+        expect(dropped).toHaveLength(1);
+        expect(dropped[0]?.reason).toContain('ambiguous');
+    });
+
+    it('DROPS a candidate that does not align to any single node (non-node-aligned)', async () => {
+        // `b ? a` is a contiguous substring of `a > b ? a : b` but crosses node
+        // boundaries — no single AST node spans exactly those characters.
+        const provider = makeMockProvider({
+            candidates: [
+                { original: 'b ? a', replacement: 'b ? b', mutatorTag: 'cross', rationale: 'n' },
+            ],
+        });
+
+        const { replacements, dropped } = await propose(provider, TARGET);
+
+        expect(replacements).toHaveLength(0);
+        expect(dropped).toHaveLength(1);
+        expect(dropped[0]?.reason).toContain('non-node-aligned');
+    });
+
+    it('DROPS a candidate that aligns to a statement-shaped node (not-an-expression)', async () => {
+        // `return a > b ? a : b;` is a ReturnStatement — aligned exactly but NOT an
+        // expression, so the expression placer would reject it.
+        const provider = makeMockProvider({
+            candidates: [
+                {
+                    original: 'return a > b ? a : b;',
+                    replacement: 'return b;',
+                    mutatorTag: 'stmt',
+                    rationale: 'n',
+                },
+            ],
+        });
+
+        const { replacements, dropped } = await propose(provider, TARGET);
+
+        expect(replacements).toHaveLength(0);
+        expect(dropped).toHaveLength(1);
+        expect(dropped[0]?.reason).toContain('not-an-expression');
+    });
+
+    it('keeps the alignable candidates and drops only the failing ones', async () => {
+        const provider = makeMockProvider({
+            candidates: [
+                { original: 'a > b', replacement: 'a < b', mutatorTag: 'ok', rationale: 'n' },
+                { original: 'q + r', replacement: 'q - r', mutatorTag: 'bad', rationale: 'n' },
+            ],
+        });
+
+        const { replacements, dropped } = await propose(provider, TARGET);
+
+        expect(replacements).toHaveLength(1);
+        expect(replacements[0]?.mutatorName).toBe(`${PROPOSE_MUTATOR_PREFIX}/ok`);
+        expect(dropped).toHaveLength(1);
+        expect(dropped[0]?.reason).toContain('not-found');
+    });
+
+    it('falls back to spanText as the file source when offsets are omitted', async () => {
+        // Backward-compat: a hand-built target with no fileContent/offsets aligns
+        // against spanText starting at offset 0.
+        const target: ProposeTarget = {
+            fileName: 'src/inline.ts',
+            range: { start: { line: 0, column: 0 }, end: { line: 0, column: 5 } },
+            spanText: 'a > b',
+        };
+        const provider = makeMockProvider({
+            candidates: [
+                { original: 'a > b', replacement: 'a < b', mutatorTag: 'flip', rationale: 'n' },
+            ],
+        });
+
+        const { replacements } = await propose(provider, target);
+        expect(replacements).toHaveLength(1);
+        expect(replacements[0]?.range).toEqual({
+            start: { line: 0, column: 0 },
+            end: { line: 0, column: 5 },
+        });
     });
 });
