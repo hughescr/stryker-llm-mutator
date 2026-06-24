@@ -9,6 +9,8 @@ const config: KnipConfig = {
     // demo/end-to-end.ts is a runnable example invoked directly with `bun run`.
     // src/seam/instrument-worker.mjs is SPAWNED as a Node child process by
     // src/seam/instrument.ts (never statically imported), so it is an entry too.
+    // scripts/*.mjs are runnable drivers invoked directly with `node` (e.g. the
+    // M0 live isambard proof), never imported — entry points, not dead code.
     entry: [
         'src/index.ts',
         '*.conf.mjs',
@@ -16,9 +18,10 @@ const config: KnipConfig = {
         'tests/**/*.ts',
         'oxlint-plugins/**/*.ts',
         'demo/**/*.ts',
+        'scripts/**/*.mjs',
         'src/seam/instrument-worker.mjs',
     ],
-    project: ['src/**/*.{ts,mjs}'],
+    project: ['src/**/*.{ts,mjs}', 'scripts/**/*.mjs'],
     ignoreDependencies: [
         // Knip's Stryker plugin maps `testRunner: 'bun'` to this package name,
         // but we use @hughescr/stryker-bun-runner (referenced in the plugins

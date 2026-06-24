@@ -17,9 +17,13 @@ coverageReporter = ["text"]
 #     extractResult) ARE covered by tests/llm/anthropic-agent-provider.test.ts.
 #   - demo/** is a runnable example, not library code, and is not imported by
 #     any test.
+#   - scripts/** are runnable drivers (e.g. the M0 live isambard proof), not
+#     library code; they perform live, sandboxed Stryker runs and are never
+#     imported by the offline test suite, so they cannot be covered offline.
 coveragePathIgnorePatterns = [
     "src/llm/anthropic-agent-provider.ts",
     "demo/",
+    "scripts/",
 ]
 onlyFailures = true
 timeout = 5

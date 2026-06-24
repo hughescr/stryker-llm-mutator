@@ -30,7 +30,8 @@
     ".claude/",
     "coverage/",
     "*.config.json",
-    "stryker-incremental.json"
+    "stryker-incremental.json",
+    ".tmp-*"
   ],
   "jsPlugins": [
     "./oxlint-plugins/test-hygiene.ts"

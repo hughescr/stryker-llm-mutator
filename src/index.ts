@@ -97,3 +97,12 @@ export {
     type ProposeOptions,
     type ProposeTarget,
 } from './pipeline/index';
+
+// ── Heuristic mutators + monkeypatch injection seam (§3.1.3 / §3.3) ──────────
+//
+// The heuristic NodeMutators (the first being `NumberLiteralValue`) and the
+// `injectMutators()` seam that registers them into Stryker's hardcoded
+// `allMutators` registry. Re-exported so the M0 driver and downstream consumers
+// can both reach them from the package root.
+export { heuristicMutators, type NodeMutator, numberLiteralValueMutator } from './mutators/index';
+export { injectMutators, type InjectMutatorsOptions, type InjectMutatorsResult } from './injection';
