@@ -10,7 +10,7 @@
  * under Bun (the CJS-default-interop wall documented in
  * `src/seam/instrument-worker.mjs`). So the REAL instrument step MUST run in Node.
  *
- * THE FOUR INVARIANTS (emitted as one JSON object on stdout):
+ * THE SIX INVARIANTS (emitted as one JSON object on stdout):
  *   (1) STRUCTURAL — `allMutators` is still `Array.isArray`, NOT `Object.isFrozen`,
  *       and has the built-in count (16). A drift flags a registry reshape.
  *   (2) DEEP-IMPORT PATHS RESOLVE — mutate.js / babel-transformer.js /
@@ -25,22 +25,37 @@
  *   (4) LLM instruments+places — build a one-entry map (hour>=12 → hour>12),
  *       inject the `llm` mutator, instrument the is-afternoon fixture, see NO
  *       statementMutantPlacer throw, 1 `llm` mutant, + its switch.
+ *   (5) RESOLUTION-PARITY — the RUNTIME-RESOLVED `allMutators` (the M6 fix:
+ *       createRequire-resolve the instrumenter package.json → join mutate.js →
+ *       dynamic import) is the SAME array INSTANCE as the hardcoded deep-import
+ *       `allMutators` (reference `===`, not deep-equal). This is the load-bearing
+ *       guarantee that the resolution fix targets the SAME hoisted instance
+ *       Stryker reads; a regression (exports-map change, a second copy) fails loud.
+ *   (6) WITHLLMMUTATORS-VIA-REAL-INSTRUMENTER — call the bundled
+ *       `withLlmMutators` (heuristics-only) which resolves allMutators via the
+ *       registry and injects, then instrument the heuristic fixture and assert the
+ *       3 NumberLiteralValue mutants + switches appear (END-TO-END: resolution →
+ *       withLlmMutators → live allMutators → transformBabel). Also assert the
+ *       returned config has NO `llmMutator` key (clean-config) and a DOUBLE call
+ *       does NOT double-register (idempotency: count stays 1).
  *
  * INPUT (argv): [2] path to a bundled ESM module exporting `injectMutators` +
- * `buildLlmMutatorMap` + `createLlmMutator` (pre-bundled by the Bun test so Node
- * can import past the repo's extensionless TS imports); [3] a JSON-serialized
- * `Replacement[]` (the LLM survivors the Bun test produced via the REAL propose →
- * range-align path).
+ * `buildLlmMutatorMap` + `createLlmMutator` + `withLlmMutators` (pre-bundled by the
+ * Bun test so Node can import past the repo's extensionless TS imports); [3] a
+ * JSON-serialized `Replacement[]` (the LLM survivors the Bun test produced via the
+ * REAL propose → range-align path).
  *
  * OUTPUT: one JSON object:
- *   { frozen, isArray, builtinCount, deepImportsOk,
+ *   { frozen, isArray, builtinCount, deepImportsOk, resolutionParity,
  *     heuristic: { count, switches },
- *     llm: { instrumented, count, switches, threw } }
+ *     llm: { instrumented, count, switches, threw },
+ *     withLlmMutators: { count, switches, cleanConfig, idempotent } }
  * On failure: { error } and exit 1.
  */
 
 import process from 'node:process';
 import path from 'node:path';
+import { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
 
 // (2) DEEP-IMPORT PATHS — these five imports ARE the resolution assertion: a
@@ -104,14 +119,31 @@ async function run() {
     }
 
     const { mods } = await import(pathToFileURL(bundlePath).href);
-    const { injectMutators, buildLlmMutatorMap, createLlmMutator } = mods;
+    const { injectMutators, buildLlmMutatorMap, createLlmMutator, withLlmMutators } = mods;
 
     // (1) STRUCTURAL invariants — assert BEFORE injecting.
     const isArray = Array.isArray(allMutators);
     const frozen = Object.isFrozen(allMutators);
     const builtinCount = allMutators.length;
 
-    // Snapshot so we can restore the pristine registry between the two instrument
+    // (5) RESOLUTION-PARITY — the M6 runtime resolution (createRequire-resolve the
+    // instrumenter package.json → join the internal mutate.js → dynamic import)
+    // must yield the SAME array INSTANCE as the hardcoded deep-import above. This is
+    // the load-bearing guarantee that withLlmMutators' injection targets the SAME
+    // hoisted array Stryker's in-process instrumenter reads. Reference `===`.
+    const require = createRequire(import.meta.url);
+    const resolvedPkgJson = require.resolve('@stryker-mutator/instrumenter/package.json');
+    const resolvedMutatePath = path.join(
+        path.dirname(resolvedPkgJson),
+        'dist',
+        'src',
+        'mutators',
+        'mutate.js',
+    );
+    const resolvedModule = await import(pathToFileURL(resolvedMutatePath).href);
+    const resolutionParity = resolvedModule.allMutators === allMutators;
+
+    // Snapshot so we can restore the pristine registry between the instrument
     // passes (each pass injects, then we restore — never leak to other importers).
     const pristine = [...allMutators];
 
@@ -155,6 +187,31 @@ async function run() {
         allMutators.splice(0, allMutators.length, ...pristine);
     }
 
+    // (6) WITHLLMMUTATORS-VIA-REAL-INSTRUMENTER — the END-TO-END consumable path:
+    // call the bundled `withLlmMutators` (heuristics-only — no dynamicLLM, so
+    // network-free) which RESOLVES allMutators via the registry and injects, then
+    // instrument the heuristic fixture and assert our mutants + switches appear.
+    // The registry resolves the SAME `allMutators` instance imported above (proven
+    // by invariant 5), so the wrapper's injection is visible to transformBabel here.
+    const withConfig = {
+        mutate: ['src/**/*.ts'],
+        llmMutator: { heuristics: { operators: ['NumberLiteralValue'] } },
+    };
+    const cleaned = await withLlmMutators(withConfig, { log: () => {} });
+    // Clean-config contract: the returned object has NO `llmMutator` key.
+    const cleanConfigOk = !('llmMutator' in cleaned);
+    // Idempotency: a SECOND call with the returned (stamped) config must NOT
+    // double-register — count of NumberLiteralValue in the live array stays 1.
+    await withLlmMutators(cleaned, { log: () => {} });
+    const nlvCount = allMutators.filter(m => m.name === 'NumberLiteralValue').length;
+    const withRun = await instrument(HEURISTIC_FIXTURE_SOURCE, HEURISTIC_FIXTURE_NAME);
+    const withMutants = withRun.mutants.filter(m => m.mutatorName === 'NumberLiteralValue');
+    const withSwitches =
+        withMutants.length > 0 &&
+        withMutants.every(m => withRun.output.includes(`stryMutAct_9fa48("${m.id}")`));
+    // Restore the pristine registry so we never leak the wrapper's injection.
+    allMutators.splice(0, allMutators.length, ...pristine);
+
     return {
         frozen,
         isArray,
@@ -163,12 +220,21 @@ async function run() {
         // the array transformBabel reads and our mutant came back — so the array
         // we push (mutate.js) IS the one transformBabel sees (via mutators/index.js).
         deepImportsOk: heuristicMutants.length > 0,
+        // (5) RESOLUTION-PARITY: runtime-resolved array === hardcoded deep-import.
+        resolutionParity,
         heuristic: { count: heuristicMutants.length, switches: heuristicSwitches },
         llm: {
             instrumented: llmInstrumented,
             count: llmMutants.length,
             switches: llmSwitches,
             ...(llmThrew === undefined ? {} : { threw: llmThrew }),
+        },
+        // (6) WITHLLMMUTATORS END-TO-END + clean-config + idempotency.
+        withLlmMutators: {
+            count: withMutants.length,
+            switches: withSwitches,
+            cleanConfig: cleanConfigOk,
+            idempotent: nlvCount === 1,
         },
     };
 }

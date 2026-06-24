@@ -15,30 +15,21 @@
  * surfaces as a compile error rather than a silent off-by-one at the seam.
  */
 
-import type {
-    Location as StrykerLocation,
-    Position as StrykerPosition,
-} from '@stryker-mutator/api/core';
+import type { Location as StrykerLocation } from '@stryker-mutator/api/core';
 
 /**
- * A spot in source code, re-exported from Stryker's own {@link StrykerPosition}
- * so our seam types stay byte-compatible with what `instrument()` consumes.
+ * A start/end span in source code, re-exported from Stryker's own
+ * {@link StrykerLocation} (`{ start, end }`, both Stryker `Position`s). `start` is
+ * inclusive; `end` is exclusive of the final character in the same way Stryker's
+ * own `Location` is, so a replacement covers `[start, end)`.
  *
  * INDEXING CONVENTION (load-bearing — get this wrong and mutants silently
  * vanish): Stryker positions are **zero-based** — the first character of a file
  * is `{ line: 0, column: 0 }`. Babel, which Stryker's instrumenter is built on,
- * reports `line` 1-based and `column` 0-based, so producers of a {@link SourceRange}
+ * reports `line` 1-based and `column` 0-based, so producers of a `SourceRange`
  * MUST normalize Babel's `line` by subtracting 1 before populating these fields.
  * Whatever a producer does, the values stored here are in Stryker's native
  * zero-based convention and are passed to the instrumenter verbatim.
- */
-export type Position = StrykerPosition;
-
-/**
- * A start/end span in source code, re-exported from Stryker's own
- * {@link StrykerLocation} (`{ start, end }`, both {@link Position}). `start` is
- * inclusive; `end` is exclusive of the final character in the same way Stryker's
- * own `Location` is, so a replacement covers `[start, end)`.
  */
 export type SourceRange = StrykerLocation;
 
@@ -54,7 +45,7 @@ export interface Replacement {
     fileName: string;
     /**
      * The 0-based, Stryker-convention span this edit replaces. Precise Babel
-     * positions (normalized — see {@link Position}), NEVER a string search, to
+     * positions (normalized — see {@link SourceRange}), NEVER a string search, to
      * avoid scope-breaking edits that masquerade as "killed" (development-plan §4.2).
      */
     range: SourceRange;

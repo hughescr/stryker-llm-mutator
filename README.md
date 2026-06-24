@@ -1,179 +1,190 @@
 @hughescr/stryker-llm-mutator
 =============================
 
-LLM-driven mutation generation for [Stryker](https://stryker-mutator.io/). Instead of relying solely on Stryker's built-in, formulaic mutators (arithmetic-operator swaps, boolean flips, string-literal edits, and so on), this plugin uses a lightweight LLM to identify mutation locations and rewrite them — producing a wider, more semantically interesting variety of mutants.
+Extra, more semantically interesting mutants for [Stryker](https://stryker-mutator.io/) — a set of 14 deterministic **heuristic** operators plus an optional **dynamic‑LLM** pre‑pass (default model **`claude-haiku-4-5`**) — that you wire into your `stryker.conf.mjs` and then run with **stock `stryker run`**. No separate runner.
 
-The default model is **`claude-haiku-4-5`** (Anthropic Claude Haiku), chosen because mutant generation is a high-volume, latency-sensitive task that suits a small, fast model.
+> **What this is, honestly.** Stryker v9 has **no public "Mutator" plugin kind** — the operator set is hardcoded inside its instrumenter. This package is therefore **not a sanctioned plugin**: it is a **monkeypatch** that pushes custom `NodeMutator`s into the instrumenter's mutable, module‑level `allMutators` array (resolved at runtime against *your* hoisted instrumenter instance), then lets **stock Stryker** do all the rest — sandboxing, perTest coverage, concurrency, checkers, incremental mode, and every reporter. Our mutants show up in your normal Stryker report, tagged by `mutatorName` (bare PascalCase for heuristics, e.g. `NumberLiteralValue`; `llm` for dynamic‑LLM). It also ships a real `PluginKind.Reporter` plugin (`llm-mutator`) for a survivor + cost view. Use at your own risk — and read [Limitations](#limitations-read-before-adopting) first. Architecture detail lives in [docs/functional-architecture.md](./docs/functional-architecture.md).
 
-Status
-------
-
-**Early development — the runtime half of the slice is real.** This is not just scaffolding: the load-bearing seam and the first vertical slice are implemented and covered by an offline test suite. `src/index.ts` is a real barrel re-exporting the implemented components. Concretely:
-
-- **Phase-0 out-of-band seam** (`src/seam/`): drives Stryker's own instrumenter out-of-band to emit BOTH coupled artifacts — the `stryMutAct_9fa48(id) ? mutated : original` activation switch in source AND the matching mutant-manifest record — in lockstep, with deterministic content-addressed mutant ids, then scores each mutant killed/survived/timeout/error.
-- **Phase-1 LLM provider** (`src/llm/`): a pluggable provider abstraction plus the first real provider — the Anthropic **Agent SDK** subscription path (`@anthropic-ai/claude-agent-sdk`, default model `claude-haiku-4-5`), with schema-validated structured output, a content-addressed cache, cost accounting, and a fully offline mock provider.
-- **Stage-2 pipeline** (`src/pipeline/`): `propose()` (LLM-driven candidate generation) feeding cheap deterministic filters (unparseable / identical / duplicate winnowing).
-- **Heuristics catalog** (`src/mutators/`): the **full P1–P4 catalog (14 deterministic, network-free operators)** is implemented as Stryker `NodeMutator`s — numeric/boundary/fallback probes (P1); comparison-strictness, call-argument, and `await`-drop (P2); early-return injection, object-spread drop, array-method and Promise-combinator swaps (P3); default-param tweak, optional-chain force, string-predicate swap, and ternary-branch swap (P4). Each has a sibling unit test at ~100% coverage and is verified to place through the **real** Stryker instrumenter. The one statement-shaped operator, `EarlyReturnInjection`, ships with a dedicated offline real-instrumenter placement canary (`tests/injection/early-return-placement-proof.test.ts`) proving Stryker's `statementMutantPlacer` accepts a block replacement at a function-body block. Some operators (`AwaitDrop`, the type-changing method swaps, `OptionalChainForce`) honestly produce mutants that score as `error`/`compileError` rather than `survived` — a build-time-caught mutant is still a kill.
-- **Config** (`src/config.ts`): plugin defaults including the default model and the `heuristics` / `dynamicLLM` switch blocks (heuristics on by default, dynamic-LLM off).
-
-The architecture has since been **decided as monkeypatch-injection** (see [docs/functional-architecture.md](./docs/functional-architecture.md)): rather than building our own runner/sandbox, the tool injects custom mutators into Stryker's internal `allMutators` registry and runs **stock Stryker** end-to-end. The out-of-band seam above (`src/seam/instrument-worker.mjs`, `runner.ts`) is no longer on the critical path — its replacement-string→AST-node parsing is reused by the LLM pre-pass, and the out-of-band path is retained only as a documented fallback. **[docs/functional-architecture.md](./docs/functional-architecture.md) is the current source of truth** for the architecture and build plan; [docs/development-plan.md](./docs/development-plan.md) holds the design rationale and provider plan. This README summarizes both.
-
-- Runtime: [Bun](https://bun.sh/)
-- Language: TypeScript (`typescript@^6`), ESM only
-- License: Apache-2.0
-
-Installation
-------------
-
-> Not yet published. Once released:
+Install
+-------
 
 ```bash
-bun add -D @hughescr/stryker-llm-mutator
+npm i -D @hughescr/stryker-llm-mutator
+# or: bun add -D @hughescr/stryker-llm-mutator
 ```
 
-`@stryker-mutator/core` (v9) is a peer dependency and must be present in the consuming project.
+**Peer requirement.** Stryker v9 must already be installed in the consuming project — this package injects into **your** instrumenter instance, the same one stock `stryker run` reads:
 
-Architecture / design direction
--------------------------------
+```jsonc
+// these are peerDependencies; install/keep them in your project
+"@stryker-mutator/core":        ">=9.6.0 <10",
+"@stryker-mutator/api":         ">=9.6.0 <10",
+"@stryker-mutator/instrumenter":">=9.6.0 <10"
+```
 
-**Important constraint:** Stryker v9 has **no public "Mutator" plugin kind**. Unlike test runners, checkers, and reporters — which are first-class, pluggable `PluginKind`s — the set of mutators is **hardcoded inside Stryker's instrumenter**. There is no supported extension point to register a custom mutator that participates in the normal instrumentation pipeline.
+Tested against **Stryker 9.6.1**. The `<10` upper bound is the honest contract: a Stryker major bump may move or freeze the internal `allMutators` array and break the injection — possibly **silently** (a clean run with *none* of our mutants, no error). Run this package's `canary` before bumping Stryker (see [Limitations](#limitations-read-before-adopting)).
 
-**How this plugin works anyway — monkeypatch-injection.** Stryker's instrumenter holds its mutator set in a module-level array, `allMutators`, that is **mutable, non-frozen, and read by reference** at instrumentation time (`@stryker-mutator/instrumenter`'s `babel-transformer.js` uses `mutators = allMutators` as a default parameter). So this plugin:
+Requires **Node ≥ 20** (Stryker 9's runtime). `withLlmMutators` and the reporter run inside your `stryker run` Node process; they never import `@stryker-mutator/core`.
 
-1. **Authors heuristic operators directly as Stryker `NodeMutator`s** (`{ name, mutate(path) }` — the tiny interface Stryker itself uses), and **dynamic-LLM mutants** as a single `LLMMutator` backed by an async pre-pass that precomputes replacements (because `mutate()` is synchronous).
-2. **Pushes those mutators into `allMutators`** (clearing it first to run ours-only, or augmenting to keep the built-ins), then…
-3. **…runs STOCK Stryker** in the same process (`new Stryker(cliOptions).runMutationTest()`). Stryker then instruments with our mutators and drives its entire normal pipeline over them — sandboxing, perTest coverage scoping, concurrency, checkers, incremental mode, and every configured reporter. Our mutants appear in Stryker's standard report, tagged distinctly by `mutatorName` (each operator's bare PascalCase name, e.g. `NumberLiteralValue`, and `llm` for dynamic-LLM mutants).
+Configure
+---------
 
-We do **not** build our own runner, sandbox, or coverage planner — stock Stryker provides all of it. See [docs/functional-architecture.md](./docs/functional-architecture.md) for the verified mechanism, the build plan, and the full risk analysis.
+Wrap your existing Stryker config with `withLlmMutators(...)` in `stryker.conf.mjs`, list this package in `plugins`, and add the `llm-mutator` reporter. Then you run **stock `stryker run`** — there is no separate CLI to learn.
 
-**Why Stryker has no mutator plugin system (and why injecting anyway is reasonable).** It is a deliberate design choice, not an oversight: a standardized cross-implementation mutator catalog + report schema keeps mutation scores comparable; the instrumenter is performance-critical and tightly Babel-coupled, so a public mutator API would freeze Babel internals as a contract; a curated operator set controls equivalent-mutant noise; and Stryker offers escape hatches (`// Stryker disable` comments, mutation ranges, "contribute upstream"). The injection works because the mutator interface is tiny and the array is mutable — **provided we own the consequences** (tag our mutants, keep our own survivor view, and never present the blended score as a comparable mutation score).
+### Heuristics only (synchronous — no credentials, no network, $0)
 
-### For Stryker users thinking of adopting this
-
-If you already run Stryker and want this plugin's heuristic and/or dynamic-LLM mutants, here is the honest "know what you're getting into":
-
-- **What it does:** adds extra, more semantically interesting mutants (formulaic heuristics, and optionally LLM-generated ones) to your mutation run, so you can find test holes the built-in operators cannot express.
-- **How it ties in:** it monkeypatches Stryker's internal `allMutators` registry and then runs **stock Stryker**, so you keep your normal Stryker sandboxing, perTest coverage, concurrency, and reporting — and our mutants show up in your standard report.
-- **What might break or surprise you:**
-  - **It depends on Stryker *internals* pinned to a specific version range.** Upgrading Stryker may break the injection, **possibly silently** (you'd get a clean run with *none* of our mutants, not an error). Check this project's supported-version note / run its smoke test before bumping Stryker.
-  - **It deep-imports past Stryker's package `exports` map** (a relative `node_modules` path), which is unsupported and fragile across versions.
-  - **Your reported mutation score will include our mutants**, so it is **not comparable** to a vanilla Stryker score. Use our tagged survivor view for the per-tool signal.
-  - **LLM mutants are non-deterministic** run-to-run and **cost real money** — dynamic-LLM mode needs your own `ANTHROPIC_API_KEY` and makes live API calls.
-  - **It is an unofficial monkeypatch Stryker does not sanction.** Use at your own risk.
-
-If those tradeoffs are acceptable, heuristics-only mode (the default) gives you the extra mutants with **zero LLM spend, no credentials, and no network**.
-
-This design direction is documented up front because it shapes the public surface: the plugin exposes configuration plus a `stryker-llm run` driver that injects mutators and invokes Stryker, rather than a `declareClassPlugin(PluginKind.Mutator, ...)`-style registration, which Stryker v9 does not offer.
-
-Configuration / usage
----------------------
-
-You configure the plugin in a `llmMutator` block in your existing `stryker.conf.*` (the same config file serves both `stryker run` and `stryker-llm run`; Stryker core only `log.warn`s on the unknown `llmMutator` key, never fatal), then drive a run with the `stryker-llm` CLI. Every field has a sane default, so an empty `llmMutator: {}` (or no block at all) parses to **heuristics-on, dynamic-LLM-off**.
+The default posture. The 14 deterministic operators only. `withLlmMutators` always returns a Promise, so you **must** `await` it — Stryker reads the config module's `default` export only after the module's top-level `await`s settle, and it does **not** unwrap a Promise `default`. Omitting `await` makes Stryker see an empty `{}` and silently drop your `testRunner`/`plugins`/`reporters`.
 
 ```js
-/** @type {import('@stryker-mutator/api/core').PartialStrykerOptions} */
-export default {
-    // ...your normal Stryker config (testRunner, mutate globs, reporters, ...)
+// stryker.conf.mjs
+import { withLlmMutators } from '@hughescr/stryker-llm-mutator';
+
+export default await withLlmMutators({
+    // ...your normal Stryker config (testRunner, mutate globs, ...)
+    plugins: ['@stryker-mutator/*', '@hughescr/stryker-llm-mutator'],
+    reporters: ['llm-mutator', 'html', 'clear-text'],
+
+    // OUR extension block — stripped from the config handed back to Stryker:
     llmMutator: {
-        // --- The two switches ---
         heuristics: {
-            enabled: true,          // default ON — deterministic, network-free
-            operators: [],          // [] = all P1–P4 operators; else an allow-list of names
+            enabled: true,   // default ON
+            operators: [],   // [] = all 14 operators; else an allow-list of names
             skipUncovered: true,
         },
-        dynamicLLM: {
-            enabled: false,         // default OFF — costs money + needs credentials
-            frozen: false,          // CI gate: cache-only deterministic re-score (see --frozen)
-            // targeting / budget / diminishingReturns sub-blocks have sane defaults;
-            // budget.maxCostUsd defaults to 5 (a HARD abort, checked between calls).
-        },
-
-        // The following apply only when dynamicLLM.enabled:
-        provider: 'anthropic-agent-sdk', // or 'anthropic-api' (per-user API key)
-        model:    'claude-haiku-4-5',    // default
-        cacheDir: '.stryker-llm-cache',  // content-addressed cache (commit/restore for warm CI)
     },
-};
+});
 ```
 
-Then run:
+### Add the dynamic‑LLM tier (async — top‑level `await`)
+
+Same `await` requirement (and additionally the LLM pre‑pass is async, so it must complete before instrumentation). Stryker `await import()`s your config, so a top‑level `await` is supported — and because you await the call, the default export stays an **object**, never a Promise/function:
+
+```js
+// stryker.conf.mjs
+import { withLlmMutators } from '@hughescr/stryker-llm-mutator';
+
+const strykerConfig = {
+    // ...your normal Stryker config
+    plugins: ['@stryker-mutator/*', '@hughescr/stryker-llm-mutator'],
+    reporters: ['llm-mutator', 'html', 'clear-text'],
+};
+
+export default await withLlmMutators({
+    ...strykerConfig,
+    llmMutator: {
+        heuristics: { enabled: true },
+        dynamicLLM: { enabled: true },     // costs money + needs credentials
+        provider: 'anthropic-agent-sdk',   // see Authentication below
+        model:    'claude-haiku-4-5',      // default
+        cacheDir: '.stryker-llm-cache',    // commit/restore for warm, free CI
+    },
+});
+```
+
+**What `withLlmMutators(config)` does.** Stryker loads `stryker.conf.mjs` with `await import(...)` in its main process, **before instrumentation**. The wrapper reads `config.llmMutator`, selects + injects the heuristic `NodeMutator`s — and, when `dynamicLLM.enabled`, runs the async LLM pre‑pass and injects a single synchronous `llm` `LLMMutator` whose replacements it precomputed — into your live, runtime‑resolved `allMutators`, **in that same process during config evaluation**. It then returns your config with `llmMutator` **removed** so Stryker sees a clean config (no unknown‑key warning). Because injection happens before instrumentation, stock `stryker run` then instruments with our mutators for free.
+
+> Import `withLlmMutators` **statically at the top** of the config (not via a deferred dynamic `import()` inside the config) so the registry resolution settles before the config is read. Calling the wrapper twice on the same object is a safe no‑op (it carries an idempotency marker).
+
+### The reporter plugin
+
+Stryker auto‑loads `node_modules/@stryker-mutator/*` plugins but **not** third‑party ones, so the explicit `plugins: ['@hughescr/stryker-llm-mutator']` entry is required for the reporter to load. Activate it by name in `reporters`:
+
+```js
+plugins:   ['@stryker-mutator/*', '@hughescr/stryker-llm-mutator'],
+reporters: ['llm-mutator', 'html', 'clear-text'],   // 'llm-mutator' is ours
+```
+
+The `llm-mutator` reporter renders OUR view on top of Stryker's standard report: a **survivors** section (the test holes the tool exists to find — one line per survivor, heuristic vs precise `llm/<tag>` distinguished), a **not‑comparable** note, and a **total LLM cost** line (`$0.00` on a heuristics‑only run). It reuses `formatReport` and reads cost from the pre‑pass via an in‑process runtime‑state hand‑off.
+
+Run
+---
+
+Just run stock Stryker — no separate CLI:
 
 ```bash
-# Heuristics-only (the default), ours-only against a 100%-suite, live:
-stryker-llm run . --ours-only --live
-
-# Add dynamic-LLM mutants (needs credentials + network; costs money):
-#   set dynamicLLM.enabled: true in the config first
-stryker-llm run . --live
-
-# Deterministic, free CI gate: re-score only already-cached LLM proposals:
-stryker-llm run . --live --frozen
+npx stryker run        # instruments with our mutators (in allMutators) + the built-ins
 ```
 
-`stryker-llm run [projectDir]` flags:
+Our mutants appear in the standard Stryker report tagged by `mutatorName` (bare PascalCase, e.g. `NumberLiteralValue`; `llm` for dynamic). With both switches **off** you get a warning + **stock, unmodified Stryker**. With `dynamicLLM` on and credentials missing, the run **fails fast** with a clear message — it never silently degrades.
 
-- `--dry-run` (default) / `--live` — `--dry-run` builds + validates + prints the plan WITHOUT invoking Stryker; `--live` actually runs it.
-- `--ours-only` / `--augment` — clear Stryker's 16 built-ins and run ONLY our mutators (best against a suite already at 100%), or keep the built-ins and add ours (the safer default for a non-100% suite).
-- `--frozen` — force CACHE-ONLY dynamic-LLM: a cache miss yields no mutant (no network), so the run is deterministic and free. Affects dynamic-LLM only; heuristics are already deterministic. The sanctioned CI gate.
-- pass-through: `--mutate <glob>` (repeatable / comma-list), `--config-file <path>`, `--concurrency <n>`, `--reporters <r,...>`, `--incremental`/`--no-incremental`, `--temp-dir <name>`.
+### Alternative — the `stryker-llm` CLI (still supported)
 
-Both switches OFF ⇒ a warning + **stock Stryker, unmodified**. Dynamic-LLM ON with no credentials ⇒ **fail fast** with a clear message (no silent degrade).
+The same `llmMutator` config also drives a bundled `stryker-llm` CLI, which injects our mutators and invokes Stryker itself. It adds an **`--ours-only`** replace mode (clear Stryker's built‑ins, run *only* ours — best against a suite already at 100%) and **`--frozen`** (cache‑only deterministic re‑score):
 
-Live proof results
+```bash
+stryker-llm run . --ours-only --live    # heuristics-only, ours-only, live
+stryker-llm run . --live                 # + dynamic-LLM (set dynamicLLM.enabled first)
+stryker-llm run . --live --frozen        # deterministic, free CI gate (cache-only LLM)
+```
+
+`stryker-llm run [projectDir]` flags: `--dry-run` (default) / `--live`; `--ours-only` / `--augment`; `--frozen`; and pass‑through `--mutate <glob>`, `--config-file <path>`, `--concurrency <n>`, `--reporters <r,...>`, `--incremental`/`--no-incremental`, `--temp-dir <name>`. (Augment‑vs‑ours‑only is CLI‑only; `withLlmMutators` always augments.)
+
+Authentication
+--------------
+
+- **Heuristics** need **nothing** — no credentials, no network, $0.
+- **Dynamic‑LLM** needs a provider with credentials. The currently‑implemented provider is `anthropic-agent-sdk` (the Anthropic Agent SDK subscription path), authenticated with **`CLAUDE_CODE_OAUTH_TOKEN`** — this is what the live proof below used. The raw per‑user API‑key provider (`anthropic-api`, reading `ANTHROPIC_API_KEY`) and OpenAI providers are **planned but not yet wired** — selecting them today throws a clear `NotImplementedError`. The credential check runs **before** any network call: `dynamicLLM` enabled with a network provider but missing credentials throws and exits non‑zero (no silent fallback to heuristics).
+
+Switches and knobs
 ------------------
 
-The architecture was proven end-to-end against [isambard](https://github.com/hughescr/) (249 src `.ts` files, **100% mutation score under vanilla Stryker** — so the bar is finding behavior changes the suite cannot kill that the 16 built-ins cannot even express):
+Everything lives under `llmMutator`. Both switches default such that an empty `llmMutator: {}` gives you all heuristics, no LLM.
 
-- **Heuristics-only:** produced **7 real survivors** the 100%-suite missed (e.g. on `src/utils/time.ts`), network-free, **$0**, no credentials.
-- **Dynamic-LLM:** produced **29 node-aligned `llm` mutants** scored by stock Stryker, **2 survivors**, total cost **$0.31** (well under the default `$5` ceiling). A warm re-run is cache-stable and free.
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `heuristics.enabled` | `true` | The deterministic, network‑free operators. |
+| `heuristics.operators` | `[]` | `[]` = all 14 (P1–P4); else an allow‑list of operator names. |
+| `heuristics.skipUncovered` | `true` | Deprioritize zero‑coverage spans where a coverage signal exists. |
+| `dynamicLLM.enabled` | `false` | The targeted LLM pre‑pass + injected `llm` mutator. Costs money + needs credentials. |
+| `dynamicLLM.frozen` | `false` | Cache‑only deterministic re‑score (a cache miss yields no mutant, no network) — the CI gate. |
+| `dynamicLLM.budget.maxCostUsd` | `5` | **Hard** dollar abort, checked between calls. |
+| `provider` | `anthropic-agent-sdk` | LLM provider (only `anthropic-agent-sdk` + `mock` implemented today). |
+| `model` | `claude-haiku-4-5` | Model id. |
+| `cacheDir` | `.stryker-llm-cache` | Content‑addressed cache. Commit/restore it for warm, free CI runs. |
 
-Three integration bugs were found and fixed during the live proof (Bun/Node `glob` interop, a disable-comment EOF over-scope, and the LLM range node-alignment exposed by the placement bug), each now guarded by an offline test.
+The 14 heuristic operators (allow‑list names for `heuristics.operators`): **P1** `NumberLiteralValue`, `BoundaryOffByOne`, `FallbackOperandSubstitution`; **P2** `ComparisonBoundaryShift`, `CallArgumentTweak`, `AwaitDrop`; **P3** `EarlyReturnInjection`, `SpreadOperandDrop`, `ArrayMethodSwap`, `PromiseCombinatorSwap`; **P4** `DefaultParamValueTweak`, `OptionalChainForce`, `StringMethodArgSwap`, `TernaryBranchSwap`. (Some — `AwaitDrop`, the type‑changing method swaps, `OptionalChainForce` — honestly produce mutants that score as `error`/`compileError` rather than `survived`; a build‑time‑caught mutant is still a kill.)
+
+Live proof
+----------
+
+Proven end‑to‑end against [isambard](https://github.com/hughescr/) — 249 src `.ts` files, **100% mutation score under vanilla Stryker**, so the bar is finding behavior changes the suite cannot kill that the 16 built‑ins cannot even express:
+
+- **Heuristics only:** **7 real survivors** the 100%‑suite missed (e.g. in `src/utils/time.ts`), network‑free, **$0**, no credentials.
+- **Dynamic‑LLM:** **29 node‑aligned `llm` mutants** scored by stock Stryker, **2 survivors**, total cost **$0.31** (well under the default $5 ceiling). A warm re‑run is cache‑stable and free.
 
 Limitations (read before adopting)
----------------------------------
+----------------------------------
 
-Beyond the architecture-level risks above, the honest tradeoffs:
-
-1. **The blended Stryker score includes our mutants** and is **NOT comparable** to a vanilla Stryker score. Use the tool's tagged survivor view for the per-tool signal; never present the blended number as your project's "real" mutation score.
-2. **Equivalent re-surfacing.** Pre-existing `// Stryker disable <BuiltInName>` comments do NOT cover our differently-named mutants (our names are bare PascalCase / `llm`), so a span an author vetted-and-disabled for a built-in operator can re-surface as a survivor under our operator — needing human audit. (Going forward, `// Stryker disable next-line all` or `// Stryker disable next-line <OurName>`/`llm` DOES suppress ours, for free, via Stryker's own bookkeeper.)
-3. **Cold-run non-determinism.** LLM proposals vary run-to-run on cache MISSES (no temperature control via the Agent SDK), which changes which `llm` mutants exist. Heuristics are fully deterministic. For a deterministic CI gate use `--frozen` (re-scores only the already-cached "frozen mutant set") with a committed/restored `cacheDir`.
-4. **Real per-user LLM cost.** Dynamic-LLM makes live Anthropic calls billed to your `ANTHROPIC_API_KEY` / subscription, bounded by `dynamicLLM.budget.maxCostUsd` (default `$5`, a hard abort consulted between calls).
-5. **Monkeypatch coupling to internal Stryker `allMutators`,** reached by a deep import — fragile across versions and **silently** breakable if a future Stryker freezes/moves the array. Guarded by a **per-version CI canary** (`bun run canary`, run in `.github/workflows/ci.yml`), pinned to Stryker `9.6.1`. Run the canary before bumping Stryker.
+1. **Version‑coupling to Stryker internals.** The injection deep‑imports the instrumenter's internal `allMutators` array (past Stryker's `exports` map) — unsupported and fragile across versions. A Stryker upgrade can break it, **possibly silently**: you'd get a clean run with *none* of our mutants, not an error. This is guarded by a per‑version smoke test (`bun run canary`, pinned to 9.6.1) — run it before bumping Stryker.
+2. **The blended score is NOT comparable** to a vanilla Stryker mutation score (it includes our injected mutants). Use the `llm-mutator` reporter's tagged survivor view for the per‑tool signal; never present the blended number as your project's "real" mutation score.
+3. **Equivalent re‑surfacing.** Pre‑existing `// Stryker disable <BuiltInName>` comments do **not** cover our differently‑named mutants (ours are bare PascalCase / `llm`), so a span vetted‑and‑disabled for a built‑in can re‑surface as a survivor under our operator — needing human audit. Going forward, `// Stryker disable next-line all` or `// Stryker disable next-line <OurName>`/`llm` does suppress ours, via Stryker's own bookkeeper.
+4. **Cold‑run LLM non‑determinism + real cost.** LLM proposals vary run‑to‑run on cache **misses**, which changes which `llm` mutants exist, and dynamic‑LLM makes live, billed API calls. Heuristics are fully deterministic and free. For a deterministic, free CI gate use `dynamicLLM.frozen: true` (or `--frozen`) with a committed/restored `cacheDir`; spend is bounded by `dynamicLLM.budget.maxCostUsd` (default $5, a hard abort).
+5. **Unofficial monkeypatch.** Stryker does not sanction this. If the tradeoffs above are unacceptable, heuristics‑only mode (the default) still gives you the extra mutants with zero LLM spend, no credentials, and no network.
 
 LLM provider plan
 -----------------
 
-The plugin uses a **pluggable provider** abstraction so the LLM backend is not hard-wired — its single operation is "given a prompt and a JSON schema, return a validated object." See [docs/development-plan.md](./docs/development-plan.md) §4.1 / §6 for the full direction. The committed posture:
-
-- The **first** provider is the Anthropic **subscription path via the Agent SDK** (`@anthropic-ai/claude-agent-sdk`), driving **`claude-haiku-4-5`** and authenticated with `CLAUDE_CODE_OAUTH_TOKEN`. This SDK is a **direct dependency** (currently dev-facing while the package is pre-publish). The Agent SDK is agentic, so the provider obtains structured output via the SDK's JSON-schema output mode rather than assuming a single round-trip.
-- The sanctioned shippable default for published consumers is the per-user Anthropic **API-key** path (raw API). Additional providers (OpenAI, OpenAI-compatible) implement the *same* interface and arrive later (§6).
-- The default model is **`claude-haiku-4-5`**.
-- Offline unit tests never touch the network: they inject a mock provider returning canned schema-valid objects. The single live smoke test is human-run.
+The plugin codes against a single `LLMProvider` abstraction ("given a prompt and a JSON schema, return a validated object"), so the backend is pluggable. The first implemented provider is the Anthropic **Agent SDK** subscription path (`@anthropic-ai/claude-agent-sdk`, default model `claude-haiku-4-5`, auth `CLAUDE_CODE_OAUTH_TOKEN`). A raw per‑user Anthropic **API‑key** path and OpenAI(‑compatible) providers implement the same interface and are planned (they currently throw `NotImplementedError`). Offline tests never touch the network — they inject a mock provider returning canned schema‑valid objects. See [docs/development-plan.md](./docs/development-plan.md) §4.1 / §6.
 
 Development
------------
+----------
 
 ```bash
 bun install
-bun run build       # bun build (esm bundle) + tsc dts (tsconfig.dts.json) -> dist/
-bun run lint        # oxlint
+bun run build       # clean + bun build (esm) + tsc dts (tsconfig.dts.json) -> dist/
 bun run typecheck   # tsc --noEmit
+bun run lint        # oxlint (zero warnings)
+bun run format      # oxfmt --write   (format:check verifies)
 bun test            # bun test (preload + coverage thresholds in bunfig.toml)
-bun run canary      # the per-version monkeypatch canary alone (run before bumping Stryker)
-bun run test:injection  # all offline real-instrumenter proofs
-bun run mutate      # stryker run (self mutation testing)
-bun run clones      # jscpd duplicate detection
+bun run build       # dist build (above)
 bun run dead-code   # knip
+bun run canary      # the per-version monkeypatch canary (run before bumping Stryker)
+bun run test:injection  # all offline real-instrumenter proofs
 ```
 
-CI runs the six gates in order (typecheck, lint, format:check, test, build, dead-code) then the canary as a final named step — see [.github/workflows/ci.yml](./.github/workflows/ci.yml). CI runs nothing live (no `stryker run`, no Anthropic call); those stay human-run.
+CI runs the six gates in order (typecheck, lint, format:check, test, build, dead‑code) then the canary as a final named step — see [.github/workflows/ci.yml](./.github/workflows/ci.yml). CI runs nothing live (no `stryker run`, no Anthropic call); those stay human‑run.
 
-Linting
--------
-
-This project uses **full [oxlint](https://oxc.rs/docs/guide/usage/linter)** as its only linter — there is no ESLint. The historical `@hughescr` ESLint ruleset has been mapped onto oxlint (native rules + custom JS plugins) as faithfully as possible. Some rules cannot be ported because oxlint's custom JS plugins are not type-aware; these are documented honestly rather than silently dropped.
-
-See [docs/oxlint-coverage.md](./docs/oxlint-coverage.md) for the full rule-by-rule mapping (native / ported / LOST).
+This project uses **full [oxlint](https://oxc.rs/docs/guide/usage/linter)** as its only linter (no ESLint). See [docs/oxlint-coverage.md](./docs/oxlint-coverage.md) for the rule‑by‑rule mapping.
 
 License
 -------

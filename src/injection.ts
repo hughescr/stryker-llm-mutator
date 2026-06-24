@@ -15,14 +15,20 @@
  *     this one shared array instance — BEFORE Stryker calls `transformBabel` —
  *     changes exactly which mutators run, for free, with no plugin descriptor.
  *
- * WHY THE DEEP `dist/src/...` IMPORT: the instrumenter's `package.json`
- * `exports` map only exposes `.` and `./package.json`; `allMutators` is reached
- * via a direct relative filesystem path into `node_modules`, exactly as
- * `src/seam/instrument-worker.mjs` reaches `transformBabel`/`MutantCollector`.
- * Because ESM module instances are singletons per resolved path, the array we
- * import here is the SAME instance `babel-transformer.js` captured as its
- * default parameter — so pushing to it is observed by the next `transformBabel`
- * call (proven offline in `tests/injection/injection-proof.test.ts`).
+ * HOW `allMutators` IS REACHED: the instrumenter's `package.json` `exports` map
+ * only exposes `.` and `./package.json`, so `allMutators` is reached by RESOLVING
+ * the package at runtime and dynamic-importing its internal `mutate.js` — see
+ * `src/instrumenter-registry.ts`, the one module that does that resolution. We
+ * import the resolved binding from there rather than via a static
+ * `../node_modules/...` relative path: that static path only resolved when this
+ * module sat beside THIS repo's `node_modules` (it points nowhere when hoisted in
+ * a consumer's tree), and worse, the bundler INLINED a private copy of the array
+ * into `dist/index.js` so injection silently no-op'd (M6 fix). Because ESM module
+ * instances are singletons per resolved path, the array the registry resolves is
+ * the SAME instance `babel-transformer.js` captured as its default parameter — so
+ * pushing to it is observed by the next `transformBabel` call (proven offline in
+ * `tests/injection/injection-proof.test.ts` and guarded by the canary's
+ * resolution-parity invariant).
  *
  * This module is intentionally PURE and SYNCHRONOUS: it only mutates an array.
  * It contains NO `stryker run`, NO child-process spawn, and NO network code —
@@ -30,7 +36,7 @@
  * keeps the injection logic trivially unit-testable.
  */
 
-import { allMutators } from '../node_modules/@stryker-mutator/instrumenter/dist/src/mutators/mutate.js';
+import { allMutators } from './instrumenter-registry';
 
 import { heuristicMutators, type NodeMutator } from './mutators/index';
 

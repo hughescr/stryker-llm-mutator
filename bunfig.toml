@@ -26,12 +26,21 @@ coverageReporter = ["text"]
 #     proof (the same Bun/Node wall as scripts/). Their PURE decision logic lives
 #     in src/driver/{cli-args,plan,gate,select-mutators,config-reader}.ts, which IS
 #     covered offline.
+#   - src/with-llm-mutators.ts is the stock-`stryker run` config wrapper. Its
+#     heuristics + clean-config + idempotency paths ARE behaviorally asserted
+#     offline (tests/with-llm-mutators.test.ts), but its dynamicLLM branch
+#     (`runDynamicLlmPrePass`) constructs a REAL provider via createProvider
+#     (Anthropic SDK) + a budgeted provider + cache and runs the pre-pass — it
+#     cannot run network-free, so the whole file is coverage-exempt (the pre-pass
+#     logic itself is covered offline by the buildLlmMutator/run tests with a
+#     MockProvider).
 #   - tests/driver/fixtures/** are config-file FIXTURES (some .mjs) loaded by the
 #     config-reader tests; they are test data, not product code.
 coveragePathIgnorePatterns = [
     "src/llm/anthropic-agent-provider.ts",
     "src/cli.ts",
     "src/driver/run.ts",
+    "src/with-llm-mutators.ts",
     "demo/",
     "scripts/",
     "**/fixtures/**",

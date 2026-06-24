@@ -11,8 +11,7 @@
     "ai",
     "anthropic",
     "claude",
-    "haiku",
-    "bun"
+    "haiku"
   ],
   "homepage": "https://github.com/hughescr/stryker-llm-mutator#readme",
   "bugs": {
@@ -24,13 +23,17 @@
   },
   "license": "Apache-2.0",
   "author": "hughescr",
-  "sideEffects": false,
+  "sideEffects": [
+    "./dist/index.js",
+    "./dist/cli.js"
+  ],
   "type": "module",
   "exports": {
     ".": {
-      "import": "./dist/index.js",
-      "types": "./dist/index.d.ts"
-    }
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
   },
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -38,10 +41,16 @@
     "stryker-llm": "dist/cli.js"
   },
   "files": [
-    "dist"
+    "dist",
+    "LICENSE.md",
+    "README.md"
   ],
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
-    "build": "bun build src/index.ts --outdir dist --target node --format esm && bun build src/cli.ts --outdir dist --target node --format esm --packages=external -e '*mutate.js' --banner='#!/usr/bin/env node' && tsc -p tsconfig.dts.json",
+    "clean": "rm -rf dist",
+    "build": "bun run clean && bun build src/index.ts --outdir dist --target node --format esm --packages=external -e '*mutate.js' && bun build src/cli.ts --outdir dist --target node --format esm --packages=external -e '*mutate.js' --banner='#!/usr/bin/env node' && tsc -p tsconfig.dts.json",
     "lint": "oxlint",
     "format": "oxfmt \"**/*.{ts,mts,cts,mjs,cjs,js}\"",
     "format:check": "oxfmt --check \"**/*.{ts,mts,cts,mjs,cjs,js}\"",
@@ -60,16 +69,18 @@
     "@babel/core": "7.29.7",
     "@babel/parser": "7.29.7",
     "@babel/types": "7.29.7",
-    "@stryker-mutator/api": "9.6.1",
-    "@stryker-mutator/instrumenter": "9.6.1",
     "zod": "4.4.3"
   },
   "peerDependencies": {
-    "@stryker-mutator/core": "^9.0.0"
+    "@stryker-mutator/api": ">=9.6.0 <10",
+    "@stryker-mutator/core": ">=9.6.0 <10",
+    "@stryker-mutator/instrumenter": ">=9.6.0 <10"
   },
   "devDependencies": {
     "@hughescr/stryker-bun-runner": "1.2.2",
+    "@stryker-mutator/api": "9.6.1",
     "@stryker-mutator/core": "9.6.1",
+    "@stryker-mutator/instrumenter": "9.6.1",
     "@stryker-mutator/typescript-checker": "9.6.1",
     "@types/bun": "1.3.14",
     "@types/node": "26.0.0",
@@ -80,6 +91,6 @@
     "typescript": "6.0.3"
   },
   "engines": {
-    "bun": ">=1.3.14"
+    "node": ">=20"
   }
 }

@@ -52,8 +52,15 @@ interface CanaryResponse {
     isArray: boolean;
     builtinCount: number;
     deepImportsOk: boolean;
+    resolutionParity: boolean;
     heuristic: { count: number; switches: boolean };
     llm: { instrumented: boolean; count: number; switches: boolean; threw?: string };
+    withLlmMutators: {
+        count: number;
+        switches: boolean;
+        cleanConfig: boolean;
+        idempotent: boolean;
+    };
     error?: string;
 }
 
@@ -132,7 +139,7 @@ async function buildLlmSurvivors(): Promise<Replacement[]> {
     return replacements;
 }
 
-describe('per-version monkeypatch canary — four load-bearing invariants (Node instrumenter)', () => {
+describe('per-version monkeypatch canary — six load-bearing invariants (Node instrumenter)', () => {
     let tmpDir = '';
     let bundlePath = '';
 
@@ -152,7 +159,8 @@ describe('per-version monkeypatch canary — four load-bearing invariants (Node 
             "import { injectMutators } from '../src/injection';\n" +
                 "import { buildLlmMutatorMap } from '../src/pipeline/llm-map';\n" +
                 "import { createLlmMutator } from '../src/mutators/llm-mutator';\n" +
-                'export const mods = { injectMutators, buildLlmMutatorMap, createLlmMutator };\n',
+                "import { withLlmMutators } from '../src/with-llm-mutators';\n" +
+                'export const mods = { injectMutators, buildLlmMutatorMap, createLlmMutator, withLlmMutators };\n',
         );
         bundlePath = path.join(tmpDir, 'canary-mods.mjs');
         const built = await Bun.build({
@@ -162,6 +170,7 @@ describe('per-version monkeypatch canary — four load-bearing invariants (Node 
             external: [
                 '@stryker-mutator/*',
                 '@babel/*',
+                '@anthropic-ai/*',
                 '../node_modules/@stryker-mutator/instrumenter/dist/src/mutators/mutate.js',
             ],
         });
@@ -180,7 +189,7 @@ describe('per-version monkeypatch canary — four load-bearing invariants (Node 
         }
     });
 
-    it('asserts all four invariants in one worker round-trip', async () => {
+    it('asserts all six invariants in one worker round-trip', async () => {
         const survivors = await buildLlmSurvivors();
         const res = await runWorker(bundlePath, survivors);
 
@@ -202,5 +211,18 @@ describe('per-version monkeypatch canary — four load-bearing invariants (Node 
         expect(res.llm.instrumented).toBe(true);
         expect(res.llm.count).toBe(1);
         expect(res.llm.switches).toBe(true);
+
+        // (5) RESOLUTION-PARITY: the M6 runtime-resolved `allMutators` is the SAME
+        // instance as the hardcoded deep-import — the load-bearing guarantee that
+        // the resolution fix targets the array Stryker actually reads.
+        expect(res.resolutionParity).toBe(true);
+
+        // (6) WITHLLMMUTATORS END-TO-END: the wrapper resolves allMutators via the
+        // registry, injects, and the heuristic mutants + switches appear through the
+        // real instrumenter; the returned config is clean; a double call is a no-op.
+        expect(res.withLlmMutators.count).toBe(3);
+        expect(res.withLlmMutators.switches).toBe(true);
+        expect(res.withLlmMutators.cleanConfig).toBe(true);
+        expect(res.withLlmMutators.idempotent).toBe(true);
     });
 });

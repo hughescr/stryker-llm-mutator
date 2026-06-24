@@ -32,7 +32,7 @@
  */
 
 import process from 'node:process';
-import { glob, mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 
 import { Stryker } from '@stryker-mutator/core';
@@ -42,14 +42,14 @@ import { injectMutators } from '../injection';
 import { createProvider } from '../llm/factory';
 import { CostAccumulator, ResponseCache } from '../llm/index';
 import { createBudgetedProvider } from '../pipeline/budgeted-provider';
-import { LLM_MUTATOR_NAME } from '../mutators/llm-mutator';
-import { type LlmMutatorMap, locKeyFromBabelLoc } from '../pipeline/llm-map';
-import type { SourceFileInput } from '../pipeline/targeting';
-import { formatReport, type MutantEnrichment, type ReportOutput } from '../report/index';
+import type { LlmMutatorMap } from '../pipeline/llm-map';
+import { correlateEnrichment } from '../report/correlate';
+import { formatReport, type ReportOutput } from '../report/index';
 import type { RunOptions } from './cli-args';
 import { readTargetConfig } from './config-reader';
 import { assertLlmCredentials, buildLlmMutator } from './gate';
 import { buildRunPlan, type RunPlan } from './plan';
+import { readMutateSources } from './read-sources';
 
 /** A line emitter for the driver's human-facing output. Injectable for the bin. */
 export type LogFn = (line: string) => void;
@@ -145,7 +145,7 @@ export async function runLlmMutation(
                     'LLM proposals; cache misses yield no mutant — deterministic re-score.',
             );
         }
-        const files = await readMutateSources(plan);
+        const files = await readMutateSources(plan.projectDir, plan.strykerOptions.mutate);
         const built = await buildLlmMutator(config, {
             provider,
             costAccumulator: cost,
@@ -195,95 +195,6 @@ export async function runLlmMutation(
     await writeFilteredReport(plan, report);
 
     return { plan, results };
-}
-
-/**
- * Read the source files Stryker will mutate (the `mutate` glob set), so the
- * pre-pass can target them. Node-only (filesystem); reuses the resolved `mutate`
- * globs, falling back to `src/**` TS. Returns absolute fileNames + content so the
- * pure pre-pass stays independent of glob mechanics.
- *
- * Uses Node 26's `glob` from `node:fs/promises` (an async iterator). It yields
- * paths RELATIVE to its `cwd` option, so each match is resolved against
- * `projectDir` to the ABSOLUTE fileName the pre-pass + reporter key on (see the
- * locKey contract in `src/pipeline/llm-map.ts`). Bun also implements this
- * `node:fs/promises` `glob`, so the same code runs under both runtimes. Negated
- * `!`-patterns are not handled (matching the prior Bun behaviour): each pattern
- * is treated positively.
- */
-async function readMutateSources(plan: RunPlan): Promise<SourceFileInput[]> {
-    const projectDir = resolve(plan.projectDir);
-    const patterns =
-        plan.strykerOptions.mutate !== undefined && plan.strykerOptions.mutate.length > 0
-            ? plan.strykerOptions.mutate
-            : ['src/**/*.ts'];
-
-    const seen = new Set<string>();
-    const files: SourceFileInput[] = [];
-    for (const pattern of patterns) {
-        // oxlint-disable-next-line no-await-in-loop -- sequential glob scans accumulate into one set; the volume is small (one or a few patterns).
-        for await (const match of glob(pattern, { cwd: projectDir })) {
-            // Node yields cwd-relative paths; resolve to the absolute fileName.
-            const absolute = resolve(projectDir, match);
-            if (seen.has(absolute)) {
-                continue;
-            }
-            seen.add(absolute);
-            // oxlint-disable-next-line no-await-in-loop -- reading discovered files; bounded by the mutate glob set.
-            const content = await readFile(absolute, 'utf8');
-            files.push({ fileName: absolute, content });
-        }
-    }
-    return files;
-}
-
-/**
- * Build the reporter's id→enrichment side-table by correlating each LLM
- * `MutantResult` back to its precomputed-map entry via location. Stryker assigns
- * mutant ids at instrument time (unknown to the pre-pass), so post-run
- * correlation by `(fileName, location)` is the only way to recover the per-
- * candidate `llm/<tag>` + original + rationale for OUR survivor view.
- *
- * LOCATION CONVERSION: the map's locKey is babel (1-based line / 0-based column);
- * `MutantResult.location` is the schema's 1-based line AND 1-based column, so the
- * babel column = `location.column - 1`. When a span carries multiple candidates
- * we cannot tell which result is which (Stryker collapses per-candidate identity),
- * so we attach the FIRST entry's metadata — coarse but honest; the filtered
- * artifact still lists every candidate.
- */
-function correlateEnrichment(
-    results: readonly MutantResult[],
-    map: LlmMutatorMap,
-): Map<string, MutantEnrichment> {
-    const enrichment = new Map<string, MutantEnrichment>();
-    for (const result of results) {
-        if (result.mutatorName !== LLM_MUTATOR_NAME) {
-            continue;
-        }
-        const byLoc = map.get(result.fileName);
-        if (byLoc === undefined) {
-            continue;
-        }
-        const loc = result.location;
-        const key = locKeyFromBabelLoc({
-            start: { line: loc.start.line, column: loc.start.column - 1 },
-            end: { line: loc.end.line, column: loc.end.column - 1 },
-        });
-        const entries = byLoc.get(key);
-        const entry = entries?.[0];
-        if (entry === undefined) {
-            continue;
-        }
-        const tag = entry.mutatorName.startsWith('llm/')
-            ? entry.mutatorName.slice('llm/'.length)
-            : undefined;
-        enrichment.set(result.id, {
-            ...(entry.original === undefined ? {} : { original: entry.original }),
-            ...(tag === undefined ? {} : { tag }),
-            ...(entry.rationale === undefined ? {} : { rationale: entry.rationale }),
-        });
-    }
-    return enrichment;
 }
 
 /** Write the filtered our-mutants-only artifact to `reports/mutation-llm.json`. */
