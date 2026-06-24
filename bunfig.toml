@@ -7,6 +7,20 @@ preload = ["./tests/test-preload.ts"]
 coverage = true
 coverageThreshold = { line = 0.95, function = 0.95, statement = 0.95 }
 coverageReporter = ["text"]
+# Files excluded from the coverage denominator. These CANNOT be exercised by the
+# offline test suite, so counting them would force the threshold below what the
+# offline tests can honestly reach:
+#   - anthropic-agent-provider.ts is the ONLY network-bound module; its live
+#     query() path (#buildOptions/#runQuery/generate) is verified by the
+#     human-run live smoke test in the main thread (development-plan §5 network
+#     note), not offline. Its pure exported helpers (resolveAuthEnv,
+#     extractResult) ARE covered by tests/llm/anthropic-agent-provider.test.ts.
+#   - demo/** is a runnable example, not library code, and is not imported by
+#     any test.
+coveragePathIgnorePatterns = [
+    "src/llm/anthropic-agent-provider.ts",
+    "demo/",
+]
 onlyFailures = true
 timeout = 5
 randomize = true

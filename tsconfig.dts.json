@@ -1,7 +1,14 @@
 {
+  "// note": "Declaration-emit config for the published types. We emit .d.ts with tsc rather than dts-bundle-generator: that tool's resolver chokes on @anthropic-ai/sdk's .d.ts.mjs typings, which embed a literal import('undici-types/index.d.ts.mjs').RequestInit path it cannot map to a symbol (the provider's public surface transitively reaches it). tsc resolves RequestInit correctly from @types/node. rootDir ./src keeps the entry's declaration at dist/index.d.ts, aligned with dist/index.js from bun build.",
   "extends": "./tsconfig.json",
   "compilerOptions": {
-    "types": ["node"]
+    "types": ["node"],
+    "rootDir": "./src",
+    "outDir": "./dist",
+    "declaration": true,
+    "declarationMap": true,
+    "emitDeclarationOnly": true,
+    "noEmit": false
   },
   "include": ["src/**/*"]
 }

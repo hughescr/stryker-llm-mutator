@@ -3,18 +3,22 @@ import type { KnipConfig } from 'knip';
 const config: KnipConfig = {
     $schema: 'https://unpkg.com/knip@6/schema.json',
     // src/index.ts is the plugin entry point; tests are also entry points.
-    // *.conf.mjs / *.config.* cover stryker.conf.mjs and dts-bundle-generator etc.
+    // *.conf.mjs / *.config.ts cover stryker.conf.mjs and knip.config.ts.
     // oxlint custom JS plugins are loaded by the oxlint binary, not imported by
     // our source, so they are entry points too (and not dead code).
+    // demo/end-to-end.ts is a runnable example invoked directly with `bun run`.
+    // src/seam/instrument-worker.mjs is SPAWNED as a Node child process by
+    // src/seam/instrument.ts (never statically imported), so it is an entry too.
     entry: [
         'src/index.ts',
         '*.conf.mjs',
         '*.config.ts',
-        '*.config.json',
         'tests/**/*.ts',
         'oxlint-plugins/**/*.ts',
+        'demo/**/*.ts',
+        'src/seam/instrument-worker.mjs',
     ],
-    project: ['src/**/*.ts'],
+    project: ['src/**/*.{ts,mjs}'],
     ignoreDependencies: [
         // Knip's Stryker plugin maps `testRunner: 'bun'` to this package name,
         // but we use @hughescr/stryker-bun-runner (referenced in the plugins

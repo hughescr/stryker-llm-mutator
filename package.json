@@ -38,7 +38,7 @@
     "dist"
   ],
   "scripts": {
-    "build": "bun build src/index.ts --outdir dist --target node --format esm && dts-bundle-generator --config dts-bundle-generator.config.json",
+    "build": "bun build src/index.ts --outdir dist --target node --format esm && tsc -p tsconfig.dts.json",
     "lint": "oxlint",
     "format": "oxfmt \"**/*.{ts,mts,cts,mjs,cjs,js}\"",
     "format:check": "oxfmt --check \"**/*.{ts,mts,cts,mjs,cjs,js}\"",
@@ -51,7 +51,12 @@
     "postversion": "git commit -m \"Bump package version to $npm_package_version\" package.json; git flow release start $npm_package_version; git flow release finish -m $npm_package_version $npm_package_version; git checkout develop; git merge main"
   },
   "dependencies": {
-    "@stryker-mutator/api": "9.6.1"
+    "@anthropic-ai/claude-agent-sdk": "0.3.186",
+    "@babel/core": "7.29.7",
+    "@babel/parser": "7.29.7",
+    "@stryker-mutator/api": "9.6.1",
+    "@stryker-mutator/instrumenter": "9.6.1",
+    "zod": "4.4.3"
   },
   "peerDependencies": {
     "@stryker-mutator/core": "^9.0.0"
@@ -62,7 +67,6 @@
     "@stryker-mutator/typescript-checker": "9.6.1",
     "@types/bun": "1.3.14",
     "@types/node": "26.0.0",
-    "dts-bundle-generator": "9.5.1",
     "jscpd": "5.0.11",
     "knip": "6.18.0",
     "oxfmt": "0.56.0",
