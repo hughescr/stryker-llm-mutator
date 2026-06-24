@@ -48,6 +48,7 @@ describe('parseArgs — defaults', () => {
         expect(opts.reporters).toBeUndefined();
         expect(opts.incremental).toBeUndefined();
         expect(opts.tempDirName).toBeUndefined();
+        expect(opts.frozen).toBeUndefined();
     });
 
     it('accepts a positional projectDir', () => {
@@ -149,6 +150,10 @@ describe('parseArgs — pass-through flags', () => {
 
     it('--temp-dir', () => {
         expect(ok(['run', '--temp-dir', '.tmp-x']).tempDirName).toBe('.tmp-x');
+    });
+
+    it('--frozen → frozen true (overrides config to cache-only)', () => {
+        expect(ok(['run', '--frozen']).frozen).toBe(true);
     });
 });
 

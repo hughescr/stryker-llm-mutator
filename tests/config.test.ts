@@ -39,6 +39,9 @@ describe('llmMutatorConfigSchema — empty block defaults', () => {
         expect(cfg.dynamicLLM.budget.maxCostUsd).toBe(5);
         expect(cfg.dynamicLLM.diminishingReturns.window).toBe(20);
         expect(cfg.dynamicLLM.diminishingReturns.minYieldPerCall).toBe(0.1);
+
+        // Frozen-set / CI-gating mode is OFF by default (the live network path).
+        expect(cfg.dynamicLLM.frozen).toBe(false);
     });
 
     it('fills the inner heuristics/dynamicLLM defaults when the blocks are absent entirely', () => {
@@ -87,6 +90,11 @@ describe('llmMutatorConfigSchema — dynamicLLM block', () => {
         expect(() =>
             llmMutatorConfigSchema.parse({ dynamicLLM: { budget: { maxCostUsd: 0 } } }),
         ).toThrow();
+    });
+
+    it('honors an explicit dynamicLLM.frozen = true (CI cache-only gate)', () => {
+        const cfg = llmMutatorConfigSchema.parse({ dynamicLLM: { enabled: true, frozen: true } });
+        expect(cfg.dynamicLLM.frozen).toBe(true);
     });
 });
 

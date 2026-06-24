@@ -18,6 +18,9 @@
  *   • `--config-file <path>` → forwarded to readTargetConfig + Stryker.
  *   • `--concurrency <n>`, `--reporters <r,...>`, `--incremental`/`--no-incremental`,
  *     `--temp-dir <name>` → assembled into the partial Stryker options.
+ *   • `--frozen` → force CACHE-ONLY dynamicLLM (deterministic, free CI gate):
+ *     re-scores only already-cached LLM proposals; cache misses yield no mutant.
+ *     Overrides config `dynamicLLM.frozen`. Affects dynamicLLM only.
  * Unknown flags / bad values → a usage error (the CLI exits 1).
  */
 
@@ -47,6 +50,14 @@ export interface RunOptions {
     incremental?: boolean;
     /** `--temp-dir <name>`, or `undefined` for Stryker's default. */
     tempDirName?: string;
+    /**
+     * `--frozen` → `true`, absent → `undefined`. When `true` it OVERRIDES the
+     * config's `dynamicLLM.frozen` to force CACHE-ONLY (deterministic, free) LLM
+     * re-scoring — the sanctioned CI gate. `undefined` leaves the config value
+     * untouched (so a config that sets `frozen: true` still takes effect). Affects
+     * dynamicLLM only; a heuristics-only run is already deterministic.
+     */
+    frozen?: boolean;
 }
 
 /** A discriminated parse outcome: success carries options; failure carries a usage message. */
@@ -59,7 +70,7 @@ const SUBCOMMAND = 'run';
 export const USAGE =
     'usage: stryker-llm run [projectDir] [--ours-only|--augment] [--dry-run|--live] ' +
     '[--mutate <glob>]... [--config-file <path>] [--concurrency <n>] ' +
-    '[--reporters <r,...>] [--incremental|--no-incremental] [--temp-dir <name>]';
+    '[--reporters <r,...>] [--incremental|--no-incremental] [--temp-dir <name>] [--frozen]';
 
 /** Parse a positive integer flag value; returns `undefined` when invalid. */
 function parsePositiveInt(value: string): number | undefined {
@@ -95,6 +106,7 @@ interface Acc {
     reporters?: string[];
     incremental?: boolean;
     tempDirName?: string;
+    frozen?: boolean;
 }
 
 /** Boolean flags: each sets one accumulator field to a fixed value. */
@@ -116,6 +128,9 @@ const BOOLEAN_FLAGS: Record<string, (acc: Acc) => void> = {
     },
     '--no-incremental': acc => {
         acc.incremental = false;
+    },
+    '--frozen': acc => {
+        acc.frozen = true;
     },
 };
 
@@ -173,6 +188,7 @@ function toOptions(acc: Acc, cwd: string): RunOptions {
         ...(acc.reporters === undefined ? {} : { reporters: acc.reporters }),
         ...(acc.incremental === undefined ? {} : { incremental: acc.incremental }),
         ...(acc.tempDirName === undefined ? {} : { tempDirName: acc.tempDirName }),
+        ...(acc.frozen === undefined ? {} : { frozen: acc.frozen }),
     };
 }
 

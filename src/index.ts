@@ -3,19 +3,31 @@
  *
  * Public entry point / barrel.
  *
- * This package uses a lightweight LLM (default model `claude-haiku-4-5`) to
- * identify mutation locations and rewrite them, producing a wider variety of
- * mutants than Stryker's built-in formulaic mutators (see
- * `docs/development-plan.md`). Stryker v9 has no public "Mutator" plugin kind —
- * the mutators are hardcoded in the instrumenter — so the integration drives
- * Stryker's own `instrument()` machinery out-of-band rather than registering a
- * new mutator plugin (§3.3). The `strykerPlugins` array is intentionally empty
- * for now: the runtime is wired through the seam, not a plugin descriptor.
+ * This package widens Stryker's mutation coverage two ways: a set of formulaic,
+ * network-free HEURISTIC mutators (the P1–P4 catalog), and an optional
+ * DYNAMIC-LLM pre-pass (default model `claude-haiku-4-5`) that proposes localized,
+ * behavior-changing edits a fixed operator table cannot express.
  *
- * This module re-exports the stable surface of the four components — the LLM
- * provider abstraction (§4.1), the out-of-band seam (§4.2), the stage-2 propose
- * pipeline + deterministic filters (§4.3), and the `llmMutator` config schema
- * (§4.4) — so downstream consumers import from the package root.
+ * ARCHITECTURE — MONKEYPATCH-INJECTION (functional-architecture §3). Stryker v9
+ * has no public "Mutator" plugin kind: the operator set is hardcoded in the
+ * instrumenter as a mutable, non-frozen module-level array (`allMutators`). So we
+ * DEEP-IMPORT that array and `push()` our own `NodeMutator`s into it — the
+ * heuristic mutators and the single per-run synchronous `LLMMutator` whose
+ * replacements the async pre-pass precomputed — then run STOCK in-process
+ * `new Stryker(...).runMutationTest()` in the SAME process, so Stryker instruments
+ * with our mutators and drives its entire pipeline (sandbox, perTest coverage,
+ * concurrency, checkers, reporters) over them for free. The `strykerPlugins`
+ * array stays empty because we integrate by injecting into `allMutators`, NOT
+ * through a plugin descriptor or an out-of-band seam (the out-of-band seam is the
+ * documented §3.5 contingency only, not the live path).
+ *
+ * This module re-exports the stable surface of the components — the LLM provider
+ * abstraction (§4.1), the heuristic mutators + the `injectMutators()` seam (§3.1),
+ * the dynamic-LLM pre-pass (targeting → batched propose → filters → precomputed
+ * map → injected `LLMMutator`, §4), the M4 reporter (§6), the driver's pure
+ * decision surface (§2 / §6), the `llmMutator` config schema (§6), and the
+ * out-of-band CONTINGENCY seam (§3.5) — so downstream consumers import from the
+ * package root.
  */
 
 /** Package version marker. */
@@ -24,8 +36,10 @@ export const VERSION = '0.1.0';
 /**
  * The Stryker plugin declaration array. Stryker loads a plugin module's
  * `strykerPlugins` export; it is intentionally empty because this package
- * integrates through the out-of-band seam (development-plan §3.3), not a
- * registered plugin descriptor.
+ * integrates by MONKEYPATCH-INJECTION into the instrumenter's `allMutators`
+ * registry (functional-architecture §3.1), not through a registered plugin
+ * descriptor (Stryker v9 has no public Mutator plugin kind) and not through an
+ * out-of-band seam.
  */
 export const strykerPlugins: readonly unknown[] = [];
 
@@ -70,7 +84,15 @@ export {
     ResponseCache,
 } from './llm/index';
 
-// ── Out-of-band Stryker seam (§4.2) ─────────────────────────────────────────
+// ── Out-of-band CONTINGENCY seam (§3.5 fallback — NOT the live path) ─────────
+//
+// The live integration is monkeypatch-injection into `allMutators` (above); this
+// out-of-band seam (drive the instrumenter ourselves + a thin runner) is the
+// DOCUMENTED CONTINGENCY for if a future Stryker freezes/moves `allMutators`
+// (§3.5). It is re-exported for that contingency AND because its
+// replacement-fragment parsing (`parseReplacementFragment`, re-exported below
+// with the pipeline) is REUSED by the live LLM pre-pass to pre-parse each
+// replacement into the node the injected `LLMMutator` yields.
 export {
     computeMutantId,
     instrument,
@@ -155,14 +177,25 @@ export {
 // `allMutators` registry. Re-exported so the M0 driver and downstream consumers
 // can both reach them from the package root.
 export {
+    arrayMethodSwapMutator,
+    awaitDropMutator,
     boundaryOffByOneMutator,
+    callArgumentTweakMutator,
+    comparisonBoundaryShiftMutator,
     createLlmMutator,
+    defaultParamValueTweakMutator,
+    earlyReturnInjectionMutator,
     fallbackOperandSubstitutionMutator,
     heuristicMutators,
     LLM_MUTATOR_NAME,
     type NodeMutator,
     type NodePath,
     numberLiteralValueMutator,
+    optionalChainForceMutator,
+    promiseCombinatorSwapMutator,
+    spreadOperandDropMutator,
+    stringMethodArgSwapMutator,
+    ternaryBranchSwapMutator,
 } from './mutators/index';
 export { injectMutators, type InjectMutatorsOptions, type InjectMutatorsResult } from './injection';
 

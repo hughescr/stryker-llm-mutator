@@ -28,15 +28,30 @@ describe('selectHeuristicMutators', () => {
     it('returns ALL registered heuristics for an empty allow-list', () => {
         const result = selectHeuristicMutators(heuristics({ operators: [] }));
         expect(result.mutators.map(m => m.name)).toEqual(ALL_NAMES);
-        expect(result.mutators).toHaveLength(3);
+        expect(result.mutators).toHaveLength(14);
         expect(result.unimplemented).toEqual([]);
     });
 
-    it('ships the P1 trio as the registered set', () => {
+    it('ships the full P1–P4 catalog as the registered set, in priority order', () => {
         expect(ALL_NAMES).toEqual([
+            // P1
             'NumberLiteralValue',
             'BoundaryOffByOne',
             'FallbackOperandSubstitution',
+            // P2
+            'ComparisonBoundaryShift',
+            'CallArgumentTweak',
+            'AwaitDrop',
+            // P3
+            'EarlyReturnInjection',
+            'SpreadOperandDrop',
+            'ArrayMethodSwap',
+            'PromiseCombinatorSwap',
+            // P4
+            'DefaultParamValueTweak',
+            'OptionalChainForce',
+            'StringMethodArgSwap',
+            'TernaryBranchSwap',
         ]);
     });
 
@@ -57,20 +72,42 @@ describe('selectHeuristicMutators', () => {
         expect(result.mutators.map(m => m.name)).toEqual(['BoundaryOffByOne']);
     });
 
-    it('collects requested-but-unimplemented operators (a not-yet-shipped catalog entry)', () => {
-        // `AwaitDrop` is a valid enum name but has no mutator yet (P2, not shipped).
+    it('selects multiple operators across priorities, preserving barrel order', () => {
         const result = selectHeuristicMutators(
-            heuristics({ operators: ['NumberLiteralValue', 'AwaitDrop'] }),
+            heuristics({ operators: ['AwaitDrop', 'NumberLiteralValue', 'TernaryBranchSwap'] }),
         );
-        expect(result.mutators.map(m => m.name)).toEqual(['NumberLiteralValue']);
-        expect(result.unimplemented).toEqual(['AwaitDrop']);
+        expect(result.mutators.map(m => m.name)).toEqual([
+            'NumberLiteralValue',
+            'AwaitDrop',
+            'TernaryBranchSwap',
+        ]);
+        expect(result.unimplemented).toEqual([]);
     });
 
-    it('returns no mutators (all unimplemented) when only unshipped operators are requested', () => {
-        const result = selectHeuristicMutators(
-            heuristics({ operators: ['AwaitDrop', 'ArrayMethodSwap'] }),
-        );
+    it('collects a requested-but-unregistered operator into `unimplemented`', () => {
+        // Every enum name in the full P1–P4 catalog is now registered, so a config
+        // can no longer name a valid-but-unshipped operator. The `unimplemented`
+        // path remains live for forward-compat (a future enum entry added before
+        // its mutator), so we exercise it by forcing a name that is not in the
+        // registry. The selection still returns the implemented ones in order.
+        const result = selectHeuristicMutators({
+            enabled: true,
+            operators: ['NumberLiteralValue', 'NotAShippedOperator'],
+            skipUncovered: true,
+        } as unknown as LlmMutatorConfig['heuristics']);
+        expect(result.mutators.map(m => m.name)).toEqual(['NumberLiteralValue']);
+        // `unimplemented` is typed as HeuristicOperatorName[]; the forced unknown
+        // name is not a member of that union, so compare on the string values.
+        expect(result.unimplemented.map(String)).toEqual(['NotAShippedOperator']);
+    });
+
+    it('returns no mutators (all unregistered) when only unknown operators are requested', () => {
+        const result = selectHeuristicMutators({
+            enabled: true,
+            operators: ['NotAShippedOperator', 'AlsoNotShipped'],
+            skipUncovered: true,
+        } as unknown as LlmMutatorConfig['heuristics']);
         expect(result.mutators).toEqual([]);
-        expect(result.unimplemented).toEqual(['AwaitDrop', 'ArrayMethodSwap']);
+        expect(result.unimplemented.map(String)).toEqual(['NotAShippedOperator', 'AlsoNotShipped']);
     });
 });

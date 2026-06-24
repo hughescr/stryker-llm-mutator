@@ -1,0 +1,89 @@
+# CI gates for @hughescr/stryker-llm-mutator (functional-architecture §3.4 / §7 M5).
+#
+# ONE `gates` job runs the six offline gates in order, then the per-version
+# monkeypatch canary as a final named step so a Stryker bump that freezes/moves
+# the internal `allMutators` registry — or changes mutant placement semantics —
+# fails LOUDLY and unmistakably in the Actions UI (the silent-break risk §3.4).
+#
+# IMPORTANT — this workflow runs NOTHING live: no `stryker run`, no Anthropic
+# call. Those need credentials + network and stay human-run (the live isambard
+# proofs). The dynamicLLM path is exercised only via offline MockProvider tests
+# and the cache-only `--frozen` mode (deterministic, free) for any future gating.
+#
+# Node is required ALONGSIDE Bun: the injection/canary tests spawn `node` to run
+# the real Stryker instrumenter (which throws under Bun — the documented Bun/Node
+# interop wall) and the worker imports `.ts` sources directly via Node's native
+# TS type-stripping, so Node must be >= 22.6 (we pin 24).
+
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+# Cancel superseded runs on the same ref to save CI minutes.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  gates:
+    name: gates
+    runs-on: ubuntu-latest
+    # Stryker is pinned to exactly 9.6.1 today, so a single config is enough. To
+    # widen to a tested range per open-question #5, uncomment the matrix and pin
+    # @stryker-mutator/* to ${{ matrix.stryker }} in an install step — the canary
+    # must pass for EVERY version in the declared range.
+    # strategy:
+    #   matrix:
+    #     stryker: ['9.6.1']
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Node first so `node` is on PATH for the instrumenter subprocess workers.
+      # Node 24 covers the worker's native TS type-stripping (needs >= 22.6).
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          # Match the bunfig engine constraint (engines.bun >= 1.3.14).
+          bun-version: '1.3.14'
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      # The six gates, in order, as separate steps so a failure pinpoints the gate.
+      - name: typecheck
+        run: bun run typecheck
+
+      - name: lint
+        run: bun run lint
+
+      # CI is READ-ONLY: use format:check (not format, which writes). Unformatted
+      # code fails the gate without dirtying the tree.
+      - name: format:check
+        run: bun run format:check
+
+      - name: test (coverage-gated)
+        run: bun test
+
+      - name: build
+        run: bun run build
+
+      - name: dead-code
+        run: bun run dead-code
+
+      # The Stryker-coupling gate, called out as its own named step so a
+      # monkeypatch break is unmistakable in the Actions UI. (It also runs inside
+      # `bun test` above; this re-runs it in isolation for a clear, loud signal.)
+      - name: per-version monkeypatch canary
+        run: bun run canary

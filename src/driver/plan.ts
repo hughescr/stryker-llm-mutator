@@ -58,8 +58,9 @@ export interface RunPlan {
     injectedMutators: NodeMutator[];
     /**
      * The injection mode actually applied. `replace` (`--ours-only`) is DOWNGRADED
-     * to `augment` when there is nothing of ours to inject, so we never clear
-     * Stryker's built-ins to an empty registry (which would mutate nothing).
+     * to `augment` when there is nothing of ours to inject — counting the deferred
+     * dynamic-LLM mutator `run.ts` appends after this plan is built — so we never
+     * clear Stryker's built-ins to an empty registry (which would mutate nothing).
      */
     mode: InjectionMode;
     /** The partial Stryker options assembled from the flags + resolved config file. */
@@ -103,14 +104,26 @@ export function buildRunPlan(
     const gate = gateSwitches(config);
     const selection = selectHeuristicMutators(config.heuristics);
 
-    // Today the injected set is exactly the heuristic selection. (run.ts appends
-    // the LLMMutator only once M3 lands; in Phase A buildLlmMutator throws first.)
+    // At plan time the injected set is exactly the heuristic selection. `run.ts`
+    // appends EXACTLY ONE synchronous `llm` LLMMutator AFTER this plan returns,
+    // whenever `gate.runDynamicLLM` is true (the M3 pre-pass builds it). The plan
+    // therefore does NOT yet contain that mutator — but the downgrade predicate
+    // below must account for it, or `--ours-only` + dynamicLLM-on (heuristics-off)
+    // would see an empty list at plan time, wrongly downgrade to `augment`, and
+    // keep Stryker's 16 built-ins instead of running ours-only (the 265-vs-29 bug).
     const injectedMutators = gate.runHeuristics ? selection.mutators : [];
 
-    // Never clear built-ins to empty: downgrade `replace` → `augment` when we have
-    // nothing of ours to inject, so stock Stryker still mutates with its built-ins.
+    // `run.ts` will push exactly one LLMMutator when dynamicLLM is gated on.
+    const willInjectLlm = gate.runDynamicLLM;
+    // "Will we inject anything of ours?" — heuristics now OR the deferred LLM mutator.
+    const willInjectAnything = injectedMutators.length > 0 || willInjectLlm;
+
+    // Never clear built-ins to empty: downgrade `replace` → `augment` ONLY when we
+    // have nothing of ours to inject (counting the deferred LLM mutator), so stock
+    // Stryker still mutates with its built-ins. With dynamicLLM on, `replace` is
+    // preserved so the run is genuinely ours-only (the LLMMutator alone).
     const mode: InjectionMode =
-        opts.mode === 'replace' && injectedMutators.length === 0 ? 'augment' : opts.mode;
+        opts.mode === 'replace' && !willInjectAnything ? 'augment' : opts.mode;
 
     return {
         projectDir: opts.projectDir,

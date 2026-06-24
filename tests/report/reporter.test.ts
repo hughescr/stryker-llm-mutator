@@ -13,6 +13,7 @@ import type { MutantResult } from '@stryker-mutator/api/core';
 
 import { formatReport, isOurMutant, type MutantEnrichment } from '../../src/report/reporter';
 import type { CostSnapshot } from '../../src/llm/index';
+import { heuristicMutators } from '../../src/mutators/index';
 
 /** Build a synthetic MutantResult with sensible defaults. */
 function mutant(over: Partial<MutantResult> & Pick<MutantResult, 'id'>): MutantResult {
@@ -40,6 +41,16 @@ describe('isOurMutant', () => {
     it('rejects built-in mutator names', () => {
         expect(isOurMutant('ArithmeticOperator')).toBe(false);
         expect(isOurMutant('BooleanLiteral')).toBe(false);
+    });
+
+    it('tags EVERY registered heuristic mutator name (no catalog drift)', () => {
+        // The anti-drift guard: HEURISTIC_NAMES is derived from the heuristicMutators
+        // barrel, so isOurMutant must tag exactly the names the tool actually injects.
+        // A future operator added to the catalog is covered automatically.
+        for (const m of heuristicMutators) {
+            expect(isOurMutant(m.name)).toBe(true);
+        }
+        expect(heuristicMutators).toHaveLength(14);
     });
 });
 

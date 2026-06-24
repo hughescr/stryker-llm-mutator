@@ -32,27 +32,21 @@
 import type { MutantResult } from '@stryker-mutator/api/core';
 
 import type { CostSnapshot } from '../llm/index';
+import { heuristicMutators } from '../mutators/index';
 
 /** The `llm/` mutator-name prefix (mirrors propose.ts PROPOSE_MUTATOR_PREFIX). */
 export const LLM_PREFIX = 'llm';
 
-/** The bare heuristic mutator names (functional-architecture §5 catalog). */
-const HEURISTIC_NAMES = new Set([
-    'NumberLiteralValue',
-    'BoundaryOffByOne',
-    'FallbackOperandSubstitution',
-    'ComparisonBoundaryShift',
-    'CallArgumentTweak',
-    'AwaitDrop',
-    'EarlyReturnInjection',
-    'SpreadOperandDrop',
-    'ArrayMethodSwap',
-    'PromiseCombinatorSwap',
-    'DefaultParamValueTweak',
-    'OptionalChainForce',
-    'StringMethodArgSwap',
-    'TernaryBranchSwap',
-]);
+/**
+ * The bare heuristic mutator names (functional-architecture §5 catalog), DERIVED
+ * from the single source of truth — the registered `heuristicMutators` barrel —
+ * rather than hand-maintained. This guarantees `isOurMutant` tags exactly the
+ * operators the tool actually injects: a future operator added to the catalog is
+ * picked up automatically, with no silent drift mis-tagging its survivors as
+ * not-ours. The import is type-and-value but acyclic and pure (the mutators
+ * package depends on no provider/network/report/config module).
+ */
+const HEURISTIC_NAMES = new Set(heuristicMutators.map(m => m.name));
 
 /** Per-mutant enrichment the driver supplies from the pre-pass side-table. */
 export interface MutantEnrichment {

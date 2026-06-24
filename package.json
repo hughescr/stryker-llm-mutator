@@ -47,6 +47,8 @@
     "format:check": "oxfmt --check \"**/*.{ts,mts,cts,mjs,cjs,js}\"",
     "typecheck": "tsc --noEmit",
     "test": "bun test",
+    "test:injection": "bun test tests/injection/",
+    "canary": "bun test tests/injection/canary.test.ts",
     "mutate": "stryker run",
     "clones": "jscpd src/",
     "dead-code": "knip",

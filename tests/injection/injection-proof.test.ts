@@ -36,6 +36,7 @@ import { fileURLToPath } from 'node:url';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'bun:test';
 
 import { injectMutators } from '../../src/injection';
+import { heuristicMutators } from '../../src/mutators/index';
 import { numberLiteralValueMutator } from '../../src/mutators/number-literal-value';
 
 // The SAME `allMutators` instance babel-transformer.js reads by reference (it IS
@@ -144,16 +145,19 @@ describe('M0 injection proof — HALF 1: registry monkeypatch (in-process, Bun)'
         expect(allMutators[0]).toBe(numberLiteralValueMutator);
     });
 
-    it('defaults to the heuristicMutators set in augment mode', () => {
+    it('defaults to the full heuristicMutators barrel in augment mode', () => {
         const result = injectMutators();
         expect(result.mode).toBe('augment');
-        // The default set is the full P1 heuristic barrel (grows per milestone).
-        expect(result.injectedNames).toEqual([
-            'NumberLiteralValue',
-            'BoundaryOffByOne',
-            'FallbackOperandSubstitution',
-        ]);
+        // The default set is the whole heuristic barrel, in barrel order — assert
+        // against the barrel itself so this self-updates as the catalog grows.
+        expect(result.injectedNames).toEqual(heuristicMutators.map(m => m.name));
+        // M5 ships the full P1–P4 catalog (14 operators); spot-check a P1, a P2,
+        // the statement-shaped P3, and a P4 operator are all registered.
+        expect(result.injectedNames).toHaveLength(14);
         expect(allMutators.some(m => m.name === 'NumberLiteralValue')).toBe(true);
+        expect(allMutators.some(m => m.name === 'ComparisonBoundaryShift')).toBe(true);
+        expect(allMutators.some(m => m.name === 'EarlyReturnInjection')).toBe(true);
+        expect(allMutators.some(m => m.name === 'TernaryBranchSwap')).toBe(true);
     });
 });
 

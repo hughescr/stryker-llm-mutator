@@ -132,6 +132,69 @@ describe('createBudgetedProvider', () => {
         expect((thrown as BudgetExceededError).reason).toBe('maxLlmCallsPerRun');
     });
 
+    describe('frozen-set / cache-only mode', () => {
+        it('names itself frozen(inner) when cacheOnly is set', () => {
+            const p = wrap(new MockProvider({ responder: () => ({ candidates: [] }) }), {
+                cacheOnly: true,
+            });
+            expect(p.name).toBe('frozen(mock)');
+        });
+
+        it('MISS: returns empty candidates, records a $0 call, and never calls the inner provider', async () => {
+            const inner = new MockProvider({
+                responder: () => ({ candidates: [{ x: 1 }] }),
+                costUsd: 0.5,
+            });
+            const p = wrap(inner, { cacheOnly: true });
+
+            const result = await p.generate<{ candidates: unknown[] }>(req());
+            // Empty-candidates shape: the propose schema admits minItems 0.
+            expect(result.value).toEqual({ candidates: [] });
+            expect(result.costUsd).toBe(0);
+            expect(result.cached).toBe(true);
+            // The inner provider was NOT called, and nothing was written to cache.
+            expect(inner.calls).toHaveLength(0);
+            // The call COUNT advances (one $0 call), so diminishing-returns sees it.
+            expect(cost.snapshot()).toEqual({ totalUsd: 0, calls: 1 });
+            // A subsequent identical call is STILL a miss (no cache write happened).
+            const again = await p.generate<{ candidates: unknown[] }>(req());
+            expect(again.value).toEqual({ candidates: [] });
+            expect(inner.calls).toHaveLength(0);
+        });
+
+        it('HIT: returns the cached value at $0 even in cacheOnly mode', async () => {
+            // Pre-seed the cache via a NON-frozen wrapper, then read it back frozen.
+            const inner = new MockProvider({
+                responder: () => ({ candidates: [{ v: 9 }] }),
+                costUsd: 0.2,
+                model: 'm9',
+            });
+            const warm = wrap(inner);
+            await warm.generate(req({ prompt: 'seed' }));
+            expect(inner.calls).toHaveLength(1);
+
+            const frozen = wrap(inner, { cacheOnly: true });
+            const hit = await frozen.generate<{ candidates: unknown[] }>(req({ prompt: 'seed' }));
+            expect(hit.cached).toBe(true);
+            expect(hit.costUsd).toBe(0);
+            expect(hit.value).toEqual({ candidates: [{ v: 9 }] });
+            // Still only the one (seeding) inner call — the frozen read hit cache.
+            expect(inner.calls).toHaveLength(1);
+        });
+
+        it('NEVER throws a budget error in cacheOnly mode (every call is $0)', async () => {
+            const inner = new MockProvider({ responder: () => ({ candidates: [] }), costUsd: 99 });
+            // Even with a $0 ceiling, frozen misses are free and must not trip it.
+            const p = wrap(inner, { cacheOnly: true, maxCostUsd: 0.0001, maxLlmCallsPerRun: 1 });
+            await p.generate(req({ prompt: 'a' }));
+            // A second call would exceed the call cap in normal mode, but cacheOnly
+            // short-circuits before the ceiling check.
+            const second = await p.generate<{ candidates: unknown[] }>(req({ prompt: 'b' }));
+            expect(second.value).toEqual({ candidates: [] });
+            expect(inner.calls).toHaveLength(0);
+        });
+    });
+
     it('reconstructs rawText from a cached entry when present', async () => {
         const inner = new MockProvider({ responder: () => ({ v: 6 }), costUsd: 0.1 });
         // Pre-seed a cache entry that carries rawText, keyed by the default content key.

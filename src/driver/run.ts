@@ -123,6 +123,13 @@ export async function runLlmMutation(
         // the pre-pass; the injected mutator is synchronous).
         const cost = new CostAccumulator();
         const cache = new ResponseCache(resolve(plan.projectDir, config.cacheDir));
+        // FROZEN-SET / CI-gating mode: `--frozen` (CLI) overrides config
+        // `dynamicLLM.frozen`. When effective, the budgeted provider runs
+        // CACHE-ONLY — a cache MISS yields no mutant (no network), so the run is a
+        // deterministic, free re-score of the already-cached LLM proposals
+        // (functional-architecture §3.4 / §7). When `--frozen` is absent the config
+        // value stands (so a config `frozen: true` still takes effect).
+        const frozen = opts.frozen ?? config.dynamicLLM.frozen;
         const provider = createBudgetedProvider(createProvider(config), {
             cache,
             cost,
@@ -130,7 +137,14 @@ export async function runLlmMutation(
             maxLlmCallsPerRun: config.dynamicLLM.budget.maxLlmCallsPerRun,
             defaultModel: config.model,
             log,
+            ...(frozen ? { cacheOnly: true } : {}),
         });
+        if (frozen) {
+            log(
+                'stryker-llm: frozen-set mode (cache-only): re-scoring only already-cached ' +
+                    'LLM proposals; cache misses yield no mutant — deterministic re-score.',
+            );
+        }
         const files = await readMutateSources(plan);
         const built = await buildLlmMutator(config, {
             provider,

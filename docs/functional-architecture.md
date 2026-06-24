@@ -120,13 +120,20 @@ also remains a documented contingency; see §3.)
 
 **Key invariants that hold the architecture together**
 
-- **`allMutators` is shared by reference.** `babel-transformer.js` line 10
-  declares `transformBabel = (..., mutators = allMutators, ...)` — the built-in
-  array is the *default parameter*, read by reference at call time. Stryker's own
-  `transformer.js` calls `transformBabel(...)` with no `mutators` argument, so it
-  picks up whatever `allMutators` currently contains. Mutating the array in place
-  (push, or clear-then-push) before Stryker instruments changes what Stryker
-  instruments. We never replace the binding; we mutate the array object.
+- **`allMutators` is shared by reference.** `babel-transformer.js` imports
+  `allMutators` from `../mutators/index.js` (an ESM re-export barrel whose
+  `export * from './mutate.js'` re-exports the array) and declares
+  `transformBabel = (..., mutators = allMutators, ...)` — the built-in array is the
+  *default parameter*, read by reference at call time. Our injection seam (and the
+  canary) DEEP-IMPORT `mutate.js` directly; ESM module-instance caching guarantees
+  `mutators/index.js`'s re-export and our direct deep-import resolve to the SAME
+  array object, so a `push` on the array we hold is seen by `transformBabel`.
+  (The per-version canary asserts this behaviorally: push → transform → see our
+  mutant.) Stryker's own `transformer.js` calls `transformBabel(...)` with no
+  `mutators` argument, so it picks up whatever `allMutators` currently contains.
+  Mutating the array in place (push, or clear-then-push) before Stryker instruments
+  changes what Stryker instruments. We never replace the binding; we mutate the
+  array object.
 - **Same process, same module instance.** The push and the
   `new Stryker(...).runMutationTest()` call MUST happen in the **same Node
   process** so they share one `@stryker-mutator/instrumenter` module instance
@@ -137,8 +144,13 @@ also remains a documented contingency; see §3.)
 - **One mutant identity = Stryker's identity.** We no longer compute our own
   mutant ids or manifest. Stryker's collector assigns ids and emits the standard
   report; our mutators only supply `{ name, mutate }`. Distinctness comes from the
-  mutator `name` (`heuristic/<op>`, `llm/<tag>`), which flows into the report's
-  `mutatorName`.
+  mutator `name`, which flows into the report's `mutatorName`. SHIPPED NAMES are
+  bare PascalCase per operator (`NumberLiteralValue`, `BoundaryOffByOne`,
+  `ComparisonBoundaryShift`, … the full §5 catalog) and the single name `llm` for
+  the dynamic-LLM mutator — NOT the `heuristic/<op>` / `llm/<tag>` forms some older
+  diagrams below still show (the per-candidate `llm/<tag>` tag lives only inside the
+  filtered report artifact, §6). Distinctness from the 16 built-ins holds because
+  none of our names collide with a built-in name.
 - **The LLM `mutate()` is synchronous.** Stryker's `NodeMutator.mutate(path)`
   returns a *synchronous* `Iterable<types.Node>`. There is no place to await an
   LLM call inside it. All LLM work happens in an **async pre-pass** before the
@@ -170,19 +182,25 @@ mutator catalog itself.
    it. `const` binds the *reference*, not the array contents, so the array stays
    mutable.
 
-2. **`babel-transformer.js` reads it by reference.** Line 10:
+2. **`babel-transformer.js` reads it by reference.** It imports `allMutators`
+   from `../mutators/index.js` (the ESM re-export barrel — `export * from
+   './mutate.js'`) and uses it as a default parameter:
    ```js
+   import { allMutators } from '../mutators/index.js';
    export const transformBabel = (..., mutators = allMutators, mutantPlacers = allMutantPlacers) => {
        ...
        for (const mutator of mutators)
            for (const replacement of mutator.mutate(node)) { ... }
    };
    ```
-   `allMutators` is a *default parameter*, resolved at each call. Stryker's
+   `allMutators` is a *default parameter*, resolved at each call. We deep-import
+   `mutate.js` DIRECTLY (the array's definition site), and ESM module-instance
+   caching makes the re-export and the direct import the SAME array object — so a
+   push on the array we hold is the array `transformBabel` sees. Stryker's
    `transformer.js` invokes `transformBabel` with **no `mutators` argument**, so
    it always uses the live `allMutators`. Mutating that array (push, or
    clear-then-push) before the call changes what Stryker instruments on the next
-   run.
+   run. (The per-version canary guards this re-export/deep-import equivalence.)
 
 3. **The mutator interface is tiny and public-ish.**
    `dist/src/mutators/node-mutator.d.ts`:
@@ -295,8 +313,21 @@ we **do not present a comparable-looking score** (§6, and risks below).
   blended number is the project's "real" mutation score.
 
 - **LLM mutants are non-deterministic run-to-run.** No temperature control via
-  the Agent SDK. A content-addressed cache stabilizes **warm** runs only; a cold
-  run on a changed span may differ.
+  the Agent SDK, so a COLD `propose()` on a span not yet cached can return
+  different candidates run-to-run — which changes WHICH `llm` mutants exist, the
+  blended score, and the survivor set. The heuristic mutators are fully
+  deterministic (pure AST); only the dynamicLLM path is non-deterministic, and only
+  on cache MISSES. A content-addressed cache (key = `SHA256(model + prompt +
+  stableStringify(schema))`) makes a WARM run (every targeted call already cached)
+  byte-for-byte reproducible and free: the budgeted provider's cache-hit branch
+  reconstructs the identical validated value at `costUsd:0`/`cached:true` and never
+  calls the model. So **reproducibility == cache coverage**. For a deterministic,
+  free CI GATE, the **frozen-set mode** (`dynamicLLM.frozen` / `--frozen`) makes the
+  pre-pass CACHE-ONLY: on a cache MISS the provider returns an EMPTY result (no
+  candidates, `$0`) instead of delegating to the network, so the run re-scores
+  EXACTLY the already-cached "frozen mutant set" and adds no new mutant. Commit (or
+  restore from an Actions cache) the `cacheDir` for a warm CI gate. (A
+  heuristics-only run is already deterministic and needs no flag.)
 
 - **Equivalent-mutant noise.** Custom mutators (heuristic and LLM) can introduce
   equivalent mutants. We filter conservatively (§4) and log every drop, but the
@@ -450,23 +481,48 @@ no NumericLiteral mutator among the 16, `LogicalOperator` swaps the *operator*
 not the *operand*, `EqualityOperator` swaps operators not boundary
 *literals/arithmetic*):
 
-| Pri | Operator | Match (AST) | Replacement | isambard example |
-|---|---|---|---|---|
-| **P1** | `NumberLiteralValue` | `NumericLiteral` (not in a Stryker-disabled span) | `n → n+1`, `n → n-1`, `n → 0` (skip when already 0) | `text.ts:34 slice(0, maxLength-1)`; `task-list-reader.ts:239 slice(0, 47)` |
-| **P1** | `BoundaryOffByOne` | `BinaryExpression` `i+1` / `len-1` in index/slice/loop context | swap `+1↔-1`, drop the `±1` | `scene-detector.ts:34 i < boundaries.length-1`; `:39 boundaries[i+1]` |
-| **P1** | `FallbackOperandSubstitution` | `LogicalExpression` `??` / `\|\|` right operand | replace fallback with `undefined` / `null` / `0` / `''` (type-appropriate) | `scene-detector.ts:39 ?? duration`; `time.ts:187 ?? resolveTimezone()` |
-| P2 | `ComparisonBoundaryShift` | `BinaryExpression` `<`↔`<=`, `>`↔`>=` | flip strictness | `time.ts:190 hour>=5 && hour<12` |
-| P2 | `CallArgumentTweak` | `CallExpression` numeric arg of slice/substring/padStart/repeat; arg-swap | `±1` on the numeric arg; swap two args | `filename.ts:36-37`; `task-list-reader.ts:205 slice(0,10)` |
-| P2 | `AwaitDrop` | `AwaitExpression` | drop `await` (bucket honestly — may type-error → `error` not `survived`) | repo-wide |
-| P3 | `EarlyReturnInjection`* | function body head | inject `return;` / `return undefined;` | — |
-| P3 | `SpreadOperandDrop` | object `SpreadElement` | drop the spread | `scene-detector.ts:30` |
-| P3 | `ArrayMethodSwap` | `map`↔`filter`↔`forEach`, `push`↔`unshift` | swap method name | repo-wide |
-| P3 | `PromiseCombinatorSwap` | `Promise.all`↔`allSettled`, `all`→`race` | swap combinator | `path-validator.ts:51`; `session-cleanup.ts:282`; `live-signals.ts:573` |
-| P4 | `DefaultParamValueTweak` / `OptionalChainForce` (`a.b → a?.b`) / `StringMethodArgSwap` (`includes→startsWith`) / `TernaryBranchSwap` | per name | per name | repo-wide |
+**Status: the FULL P1–P4 catalog is IMPLEMENTED (M5).** All 14 operators ship as
+Stryker `NodeMutator`s in `src/mutators/` (barrel `src/mutators/index.ts`,
+registry `src/driver/select-mutators.ts`), each with a sibling unit test in
+`tests/mutators/` at ~100% coverage, and each verified to place cleanly through
+the REAL `@stryker-mutator/instrumenter`.
 
-\* `EarlyReturnInjection` is statement-shaped — confirm Stryker's placers accept a
-statement replacement at the function-body head before shipping; otherwise defer
-to P3+.
+| Pri | Operator | Status | Match (AST) | Replacement | isambard example |
+|---|---|---|---|---|---|
+| **P1** | `NumberLiteralValue` | ✅ M1 | `NumericLiteral` (not in a Stryker-disabled span) | `n → n+1`, `n → n-1`, `n → 0` (skip when already 0) | `text.ts:34 slice(0, maxLength-1)`; `task-list-reader.ts:239 slice(0, 47)` |
+| **P1** | `BoundaryOffByOne` | ✅ M1 | `BinaryExpression` `i+1` / `len-1` (exactly one operand the literal `1`) | swap `+1↔-1`, drop the `±1` | `scene-detector.ts:34 i < boundaries.length-1`; `:39 boundaries[i+1]` |
+| **P1** | `FallbackOperandSubstitution` | ✅ M1 | `LogicalExpression` `??` / `\|\|` right operand | replace fallback with `undefined` / `null` / `0` / `''` (skip when already that value) | `scene-detector.ts:39 ?? duration`; `time.ts:187 ?? resolveTimezone()` |
+| P2 | `ComparisonBoundaryShift` | ✅ M5 | `BinaryExpression` `<`↔`<=`, `>`↔`>=` | flip strictness (both operands reused) | `time.ts:190 hour>=5 && hour<12` |
+| P2 | `CallArgumentTweak` | ✅ M5 | `CallExpression`: numeric arg of slice/substring/substr/padStart/padEnd/repeat/splice; OR any ≥2-arg call | `±1` on each numeric arg (gated methods); swap first two args | `filename.ts:36-37`; `task-list-reader.ts:205 slice(0,10)` |
+| P2 | `AwaitDrop` | ✅ M5 | `AwaitExpression` | drop `await` → yield the argument (bucket honestly — may type-error → `error` not `survived`) | repo-wide |
+| P3 | `EarlyReturnInjection`* | ✅ M5 | function-body `BlockStatement` (parent is a function shape; non-empty) | prepend `return;` / `return undefined;` | repo-wide |
+| P3 | `SpreadOperandDrop` | ✅ M5 | object `SpreadElement` (in an `ObjectExpression`) | drop ONE spread per mutant | `scene-detector.ts:30` |
+| P3 | `ArrayMethodSwap` | ✅ M5 | `CallExpression` `xs.<m>(…)` where `m` ∈ {map, filter, forEach, push, unshift} | swap method name (`map`↔`filter`↔`forEach`, `push`↔`unshift`) | repo-wide |
+| P3 | `PromiseCombinatorSwap` | ✅ M5 | `CallExpression` `Promise.<c>(…)` where `c` ∈ {all, allSettled, race, any} | swap combinator (`all`→{allSettled,race}, etc.) | `path-validator.ts:51`; `session-cleanup.ts:282`; `live-signals.ts:573` |
+| P4 | `DefaultParamValueTweak` | ✅ M5 | `AssignmentPattern` with a numeric/boolean/string literal default | numeric `±1`/`0`, boolean flip, string `→ ''` | repo-wide |
+| P4 | `OptionalChainForce` | ✅ M5 | plain `MemberExpression` (`a.b`, `a[i]`, `this.x`; not a PrivateName) | force `?.` (emit an `OptionalMemberExpression`) | repo-wide |
+| P4 | `StringMethodArgSwap` | ✅ M5 | `CallExpression` `s.<m>(…)` where `m` ∈ {includes, startsWith, endsWith} | swap predicate method name | repo-wide |
+| P4 | `TernaryBranchSwap` | ✅ M5 | `ConditionalExpression` with non-equal branches | swap consequent/alternate (test reused) | repo-wide |
+
+\* `EarlyReturnInjection` is the ONLY statement-shaped operator (it yields a
+`BlockStatement` to replace a function-body `BlockStatement`). Per §5 constraint 3,
+its placement was VERIFIED against Stryker's real placers before shipping: it
+PLACES CLEANLY because `statementMutantPlacer` (`canPlace = path.isStatement()`)
+special-cases `path.isBlockStatement()` and wraps the placed block correctly. It
+therefore SHIPS (not deferred), guarded by a dedicated offline real-instrumenter
+canary, `tests/injection/early-return-placement-proof.test.ts` (+ its
+`.mjs` Node worker), cloned from the LLM placement proof. If that canary ever fails
+on a Stryker bump, `EarlyReturnInjection` must be deferred (unregistered from the
+barrel) until the statement-placement contract is re-confirmed.
+
+**Honest bucketing (intended).** Several operators deliberately produce mutants
+that score as `error` / `compileError` rather than `survived` — a build-time-caught
+mutant is a kill of a different colour, not a placement failure: `AwaitDrop`
+(`Promise<T>` vs `T` type errors), `ArrayMethodSwap`/`StringMethodArgSwap` return-
+or receiver-type mismatches (`forEach` drops the return value; `Array.includes`
+swapped to `startsWith` throws), `PromiseCombinatorSwap` `all`→`race` (result-shape
+change), and `OptionalChainForce` on a non-nullable typed object. This is
+documented in each operator's file header.
 
 **Volume guard.** Heuristics fire on **every** matching node across all files —
 but the run cost of that is now **Stryker's** perTest-scoped, concurrency-bounded
@@ -476,13 +532,40 @@ clean first proof; P2–P4 land after the survivor view + equivalent filtering
 (§6) exist to manage the extra noise. Honor a `skipUncovered`-style targeting
 preference where a coverage signal is available.
 
-**Equivalence/disable-comment handling.** isambard's `// Stryker disable <Name>`
-comments target *built-in* names; our `heuristic/*` names won't be suppressed by
-them. Stryker's `DirectiveBookkeeper` is constructed with the live `mutators`
-list, so our names ARE eligible for `// Stryker disable heuristic/<op>` going
-forward — but existing target comments won't cover them. For the first useful
-run, **accept the noise and human-audit survivors**; add disable-comment honoring
-for our names later if equivalent-survivor noise proves real.
+**Equivalence/disable-comment handling.** Our operators ship under BARE PascalCase
+names (`NumberLiteralValue`, `BoundaryOffByOne`, `ComparisonBoundaryShift`, …) and
+the dynamic-LLM mutator under the single name `llm` — NOT `heuristic/<op>` /
+`llm/<tag>` (the per-candidate `llm/<tag>` tag survives only inside the filtered
+report artifact's `mutatorName`, not as the Stryker operator name). Disable-comment
+honoring works for our names FOR FREE, because of HOW Stryker wires its
+`DirectiveBookkeeper`: `babel-transformer.js` constructs the bookkeeper with the
+SAME live `mutators` array (our injected `allMutators`), and at collection time it
+computes `findIgnoreReason(line, mutator.name)` against the comment's
+case-insensitively-matched names OR the wildcard `all`, then filters out
+`ignoreReason`d mutants. Injection happens BEFORE the bookkeeper is constructed, so:
+
+- `// Stryker disable all` (and `disable next-line all`) DOES suppress our
+  heuristic mutants AND the `llm` mutant — the wildcard matches everything,
+  including our names. **Confirmed clean win, no code needed.**
+- `// Stryker disable NumberLiteralValue` (or `disable llm`, `disable
+  BoundaryOffByOne`, …) WORKS going forward — our names are in the live list the
+  bookkeeper was built with (case-insensitive match), so a user CAN suppress a
+  specific re-surfaced equivalent by name.
+- A pre-existing `// Stryker disable EqualityOperator` (a BUILT-IN name) does NOT
+  suppress our differently-named mutants — by design. So a span the author vetted
+  and disabled for a built-in operator can RE-SURFACE as a survivor under our
+  different operator name (the author never vetted ours). This is EXPECTED; such
+  survivors still need human audit (§3.4).
+- `warnAboutUnusedDirective`: a `disable <name>` comment naming a mutator not in
+  the live injected set (e.g. naming `llm` in a heuristics-only run) emits a benign
+  `log.warn("Unused 'Stryker disable' directive…")`.
+
+To suppress one of OUR re-surfaced equivalents, add `// Stryker disable next-line
+all` (covers everything at that line) OR `// Stryker disable next-line
+<OurOperatorName>` / `// Stryker disable next-line llm`, with a `:reason`. We add
+NO parallel disable-honoring layer — duplicating Stryker's bookkeeper would risk
+diverging from it. For the first useful run, **accept the residual noise and
+human-audit survivors**.
 
 ---
 
@@ -551,14 +634,17 @@ precomputed map), **pushes** the heuristic mutators and/or the `LLMMutator` into
 awaits `new Stryker(cliOptions).runMutationTest()` in-process. Switch interplay:
 both ON = additive (tagged distinctly); both OFF = **warn + run stock Stryker
 unmodified** (or no-op); dynamicLLM ON but no credentials = **fail fast** with a
-clear message (do not silently degrade). Flags: `--dry-run`/`--live` mirroring the
-demo; optional `--budget-override`; `--ours-only`/`--augment` to pick the
-clear-vs-push mode.
+clear message (do not silently degrade). Flags (as shipped): `--dry-run` (default)
+/ `--live`; `--ours-only` / `--augment` to pick the clear-vs-push mode; `--frozen`
+to force CACHE-ONLY dynamicLLM (deterministic, free CI gate — §3.4); plus
+pass-through `--mutate`, `--config-file`, `--concurrency`, `--reporters`,
+`--incremental`/`--no-incremental`, `--temp-dir`.
 
 **Reporting.** Because our mutants run *inside* Stryker, they already appear in
-**Stryker's standard report** (HTML / JSON / dashboard) with `mutatorName`
-`heuristic/<op>` or `llm/<tag>` — visually distinct from built-ins, no schema
-emission of our own required for basic consumption. On top of that, the reporter
+**Stryker's standard report** (HTML / JSON / dashboard) with `mutatorName` set to
+our operator's bare PascalCase name (`NumberLiteralValue`, …) or `llm` — visually
+distinct from built-ins, no schema emission of our own required for basic
+consumption. On top of that, the reporter
 adds **our own view**: a console summary with a **SURVIVORS** section
 (`file:line  mutatorName  original → replacement  (rationale)` — survivors ARE
 the test holes the tool exists to find), a clear note that **the blended score
@@ -644,16 +730,49 @@ load-bearing proof.
 - **Network:** none (consumes prior run output). **Parallel:** can be built
   alongside M3 (it only needs the report + cost snapshot, available from M1).
 
-### M5 — Scale / caching / resilience / CI canary *(mixed)*
-- **Build:** full P2–P4 heuristics (now safe under the survivor view); provider
-  cache fully wired for warm-run reproducibility; **the per-version monkeypatch
-  smoke test (§3.4) wired into CI** so a Stryker bump that freezes/moves
-  `allMutators` fails loudly; document cold-run non-reproducibility + a "frozen
-  mutant set" mode (re-score cached ids only) for CI gates; optional provider
-  fallback (subscription → API key); the documented out-of-band contingency
-  (§3.5) recorded but not built; dog-food self-mutation script.
+### M5 — Scale / caching / resilience / CI canary *(mixed)* — **DONE**
+- **Build:** full P2–P4 heuristics (now safe under the survivor view) — **DONE:
+  all 11 P2–P4 operators are implemented as `NodeMutator`s, registered in the
+  barrel, unit-tested at ~100%, and verified to place through the real
+  instrumenter** (the 10 expression-shaped ones by the unit-test idiom + the M0
+  injection canary; the single statement-shaped `EarlyReturnInjection` by its own
+  `tests/injection/early-return-placement-proof.test.ts` canary, which proved it
+  places cleanly — so it ships rather than deferring). Plus, also DONE:
+  - **The per-version monkeypatch canary (§3.4) is wired into CI.** A single
+    consolidated `tests/injection/canary.test.ts` (+ `canary-worker.mjs`) asserts,
+    in one Node-subprocess round-trip, the FOUR load-bearing invariants:
+    (1) `allMutators` is a non-frozen `Array` of the built-in count (16);
+    (2) the five deep `dist/src/...` imports resolve AND `babel-transformer` reads
+    the same array we push to; (3) a heuristic mutant instruments+places (the
+    `5000` fixture → 3 `NumberLiteralValue` mutants + switches); (4) an `llm` mutant
+    instruments+places with NO `statementMutantPlacer` throw (the node-aligned
+    `hour >= 12 → hour > 12` survivor). A `bun run canary` script runs it in
+    isolation, and `.github/workflows/ci.yml` runs the six gates in order then the
+    canary as a final named "per-version monkeypatch canary" step. The two detailed
+    proofs (`injection-proof` + `llm-placement-proof` + `early-return-placement-
+    proof`) remain for regression depth. (Open-question #5: Stryker is pinned to
+    exactly 9.6.1; the workflow carries a commented matrix stub to widen the range.)
+  - **Cold-run non-determinism documented + frozen-set mode shipped** (§3.4). The
+    config gains `dynamicLLM.frozen` and the CLI gains `--frozen`; the budgeted
+    provider gains a `cacheOnly` path that, on a cache MISS, records a `$0` call and
+    returns empty candidates WITHOUT calling the network or writing the cache — a
+    deterministic, free CI gate that re-scores only the already-cached frozen set
+    (open-question #6).
+  - **Disable-comment honoring is a CLEAN WIN with no code** (§5): Stryker's own
+    `DirectiveBookkeeper` is constructed with the live injected `allMutators`, so
+    `// Stryker disable all` AND `// Stryker disable <OurName>` / `disable llm` both
+    suppress ours for free; only pre-existing built-in-name disables don't cover us
+    (expected equivalent re-surfacing) (open-question #7).
+  - **The mode-downgrade follow-up fix** (`src/driver/plan.ts`): the `replace →
+    augment` downgrade now counts the deferred dynamic-LLM mutator
+    (`gate.runDynamicLLM`), so `--ours-only` + dynamicLLM-on (heuristics-off) keeps
+    `mode: replace` instead of wrongly retaining the 16 built-ins (the 265-vs-29
+    live bug). Unit-tested in `tests/driver/plan.test.ts`.
+  - Recorded-but-not-built: the documented out-of-band contingency (§3.5); optional
+    provider fallback (subscription → API key); dog-food self-mutation script.
 - **Acceptance:** a full-repo isambard run completes through stock Stryker; warm
-  re-run is reproducible; the CI smoke test gates every Stryker bump.
+  re-run is reproducible (frozen-set mode for the deterministic CI gate); the CI
+  canary gates every Stryker bump.
 - **Network:** live for the full run (human-run). **Parallel:** sub-items largely
   independent.
 

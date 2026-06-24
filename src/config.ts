@@ -45,29 +45,28 @@ export const Stage3Mode = z.enum(['off', 'confirm']);
 /**
  * The heuristic operator catalog (functional-architecture §5). Each name is the
  * `name` field of a heuristic `NodeMutator` and the allow-list token used by
- * `heuristics.operators`. The names span the prioritized P1–P4 catalog; only the
- * P1 trio (`NumberLiteralValue`, `BoundaryOffByOne`, `FallbackOperandSubstitution`)
- * is implemented today, but the enum carries the full catalog so a target config
- * can name a not-yet-shipped operator without a schema error (it is simply absent
- * from the live registry until its milestone lands — see the driver's
- * `selectHeuristicMutators`). The enum is intentionally a CLOSED allow-list, so an
- * unknown/typo'd operator name is a config error rather than a silent no-op.
+ * `heuristics.operators`. The names span the prioritized P1–P4 catalog, and as of
+ * M5 ALL of them are implemented + registered: every entry here has a matching
+ * `NodeMutator` in the `heuristicMutators` barrel (src/mutators/index.ts) and the
+ * driver's `selectHeuristicMutators` registry (src/driver/select-mutators.ts). The
+ * enum is intentionally a CLOSED allow-list, so an unknown/typo'd operator name is
+ * a config error rather than a silent no-op.
  */
 export const HeuristicOperator = z.enum([
     // P1 — shipped (M1)
     'NumberLiteralValue',
     'BoundaryOffByOne',
     'FallbackOperandSubstitution',
-    // P2
+    // P2 — shipped (M5)
     'ComparisonBoundaryShift',
     'CallArgumentTweak',
     'AwaitDrop',
-    // P3
+    // P3 — shipped (M5)
     'EarlyReturnInjection',
     'SpreadOperandDrop',
     'ArrayMethodSwap',
     'PromiseCombinatorSwap',
-    // P4
+    // P4 — shipped (M5)
     'DefaultParamValueTweak',
     'OptionalChainForce',
     'StringMethodArgSwap',
@@ -158,6 +157,16 @@ export const llmMutatorConfigSchema = z
             .object({
                 /** THE switch — dynamic LLM off by default. */
                 enabled: z.boolean().default(false),
+                /**
+                 * CI-gating / reproducibility mode (functional-architecture §3.4 /
+                 * §7). When `true`, the pre-pass is CACHE-ONLY: a cache MISS yields
+                 * NO mutant (no network call), so the run re-scores ONLY the LLM
+                 * proposals already resident in `cacheDir` — making the dynamicLLM
+                 * run deterministic and free, suitable for a CI gate. Default
+                 * `false`. The `--frozen` CLI flag overrides this to `true`. A
+                 * heuristics-only run is already deterministic and ignores this.
+                 */
+                frozen: z.boolean().default(false),
                 /** Stage-1 risk/EV targeting bounds (functional-architecture §4 Gate 1). */
                 targeting: z
                     .object({

@@ -17,6 +17,16 @@
  * `costUsd: 0, cached: true`, records a zero-cost call (so the call COUNT still
  * advances), and never hits the network — so warm re-runs and overlapping spans
  * are free. A MISS delegates, then records the real cost and stores the entry.
+ *
+ * FROZEN-SET MODE (`cacheOnly: true`, functional-architecture §3.4 / §7 CI
+ * gating). When set, the wrapper NEVER reaches the network: a HIT behaves exactly
+ * as above, but a MISS records a zero-cost call and returns an EMPTY-candidates
+ * result (`{ candidates: [] }`) WITHOUT calling `inner.generate` or `cache.set`.
+ * The net effect is a deterministic, free re-score of ONLY the proposals already
+ * resident in the cache (the "frozen mutant set") — cache misses contribute no
+ * mutant. `propose()`/`runPrePass` already handle a zero-candidate response (it
+ * just yields no survivors for that target), so this requires no pre-pass change.
+ * The empty shape satisfies the propose schema (`candidates` has `minItems: 0`).
  */
 
 import {
@@ -68,6 +78,13 @@ export interface BudgetedProviderOptions {
     defaultModel: string;
     /** Optional note logger (cache hits, aborts). */
     log?: BudgetLogger;
+    /**
+     * FROZEN-SET / CI-gating mode. When `true`, a cache MISS does NOT call the
+     * inner provider or write the cache — it records a zero-cost call and returns
+     * an empty-candidates result, so the run re-scores ONLY already-cached
+     * proposals (deterministic + free). Default `false` (the live network path).
+     */
+    cacheOnly?: boolean;
 }
 
 /**
@@ -88,9 +105,10 @@ export function createBudgetedProvider(
     options: BudgetedProviderOptions,
 ): LLMProvider {
     const { cache, cost, maxCostUsd, maxLlmCallsPerRun, defaultModel, log } = options;
+    const cacheOnly = options.cacheOnly ?? false;
 
     return {
-        name: `budgeted(${inner.name})`,
+        name: `${cacheOnly ? 'frozen' : 'budgeted'}(${inner.name})`,
 
         async generate<T>(request: ProviderRequest): Promise<ProviderResult<T>> {
             const key =
@@ -111,6 +129,22 @@ export function createBudgetedProvider(
                     model: hit.model,
                     cached: true,
                     ...(hit.rawText === undefined ? {} : { rawText: hit.rawText }),
+                };
+            }
+
+            // FROZEN-SET MODE: a MISS yields no mutant — record a $0 call and
+            // return an empty-candidates result WITHOUT touching the network or
+            // the cache. Deterministic + free re-score of the cached set only.
+            if (cacheOnly) {
+                cost.add(0);
+                log?.(`frozen miss (${key.slice(0, 12)}…) — $0.00, no candidates`);
+                return {
+                    // The propose schema admits `{ candidates: [] }` (minItems 0);
+                    // a target with no candidates simply yields no survivor.
+                    value: { candidates: [] } as T,
+                    costUsd: 0,
+                    model: defaultModel,
+                    cached: true,
                 };
             }
 
