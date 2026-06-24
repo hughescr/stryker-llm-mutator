@@ -34,11 +34,14 @@
   },
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "bin": {
+    "stryker-llm": "dist/cli.js"
+  },
   "files": [
     "dist"
   ],
   "scripts": {
-    "build": "bun build src/index.ts --outdir dist --target node --format esm && tsc -p tsconfig.dts.json",
+    "build": "bun build src/index.ts --outdir dist --target node --format esm && bun build src/cli.ts --outdir dist --target node --format esm --packages=external -e '*mutate.js' --banner='#!/usr/bin/env node' && tsc -p tsconfig.dts.json",
     "lint": "oxlint",
     "format": "oxfmt \"**/*.{ts,mts,cts,mjs,cjs,js}\"",
     "format:check": "oxfmt --check \"**/*.{ts,mts,cts,mjs,cjs,js}\"",

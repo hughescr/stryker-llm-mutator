@@ -11,8 +11,11 @@ const config: KnipConfig = {
     // src/seam/instrument.ts (never statically imported), so it is an entry too.
     // scripts/*.mjs are runnable drivers invoked directly with `node` (e.g. the
     // M0 live isambard proof), never imported — entry points, not dead code.
+    // src/cli.ts is the `stryker-llm` bin entry (package.json `bin`), built to
+    // dist/cli.js and invoked directly — an entry point, not dead code.
     entry: [
         'src/index.ts',
+        'src/cli.ts',
         '*.conf.mjs',
         '*.config.ts',
         'tests/**/*.ts',

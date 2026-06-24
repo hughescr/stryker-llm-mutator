@@ -1,0 +1,6 @@
+{
+  "llmMutator": {
+    "provider": "mock",
+    "heuristics": { "enabled": false }
+  }
+}

@@ -10,14 +10,24 @@
  */
 
 import type { NodeMutator } from './types';
+import { boundaryOffByOneMutator } from './boundary-off-by-one';
+import { fallbackOperandSubstitutionMutator } from './fallback-operand-substitution';
 import { numberLiteralValueMutator } from './number-literal-value';
 
 export type { NodeMutator } from './types';
+export { boundaryOffByOneMutator } from './boundary-off-by-one';
+export { fallbackOperandSubstitutionMutator } from './fallback-operand-substitution';
 export { numberLiteralValueMutator } from './number-literal-value';
 
 /**
  * Every heuristic mutator this package ships, in a stable order. This is the
- * default set `src/injection.ts` registers into Stryker's `allMutators`. For
- * the M0 proof it holds exactly one entry; later milestones append more.
+ * default set `src/injection.ts` registers into Stryker's `allMutators`, and the
+ * order the driver's `selectHeuristicMutators` preserves. M1 ships the P1 trio
+ * (`NumberLiteralValue`, `BoundaryOffByOne`, `FallbackOperandSubstitution`);
+ * later milestones append P2–P4.
  */
-export const heuristicMutators: readonly NodeMutator[] = [numberLiteralValueMutator];
+export const heuristicMutators: readonly NodeMutator[] = [
+    numberLiteralValueMutator,
+    boundaryOffByOneMutator,
+    fallbackOperandSubstitutionMutator,
+];

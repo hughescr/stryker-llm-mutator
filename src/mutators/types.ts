@@ -28,8 +28,10 @@
 
 import type {
     BigIntLiteral,
+    BinaryExpression,
     BooleanLiteral,
     Identifier,
+    LogicalExpression,
     Node,
     NumericLiteral,
     StringLiteral,
@@ -58,6 +60,16 @@ export interface NodePath {
     isBigIntLiteral(): this is { readonly node: BigIntLiteral };
     /** Narrows `node` to `Identifier`. */
     isIdentifier(): this is { readonly node: Identifier };
+    /**
+     * Narrows `node` to `BinaryExpression` (e.g. `i + 1`, `len - 1`, `a < b`).
+     * Used by `BoundaryOffByOne` (and later the P2 `ComparisonBoundaryShift`).
+     */
+    isBinaryExpression(): this is { readonly node: BinaryExpression };
+    /**
+     * Narrows `node` to `LogicalExpression` (`??`, `||`, `&&`). Used by
+     * `FallbackOperandSubstitution`.
+     */
+    isLogicalExpression(): this is { readonly node: LogicalExpression };
     /** Halts the surrounding `traverse` early (used by test helpers). */
     stop(): void;
 }

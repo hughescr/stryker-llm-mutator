@@ -1,0 +1,10 @@
+{
+  "mutate": ["src/**/*.ts"],
+  "testRunner": "bun",
+  "llmMutator": {
+    "provider": "mock",
+    "heuristics": {
+      "operators": ["NumberLiteralValue"]
+    }
+  }
+}

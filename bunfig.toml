@@ -20,10 +20,21 @@ coverageReporter = ["text"]
 #   - scripts/** are runnable drivers (e.g. the M0 live isambard proof), not
 #     library code; they perform live, sandboxed Stryker runs and are never
 #     imported by the offline test suite, so they cannot be covered offline.
+#   - src/cli.ts and src/driver/run.ts import @stryker-mutator/core, whose
+#     instrumenter throws `generator is not a function` under Bun, so they CANNOT
+#     run under `bun test`; they are exercised only by the human-run live isambard
+#     proof (the same Bun/Node wall as scripts/). Their PURE decision logic lives
+#     in src/driver/{cli-args,plan,gate,select-mutators,config-reader}.ts, which IS
+#     covered offline.
+#   - tests/driver/fixtures/** are config-file FIXTURES (some .mjs) loaded by the
+#     config-reader tests; they are test data, not product code.
 coveragePathIgnorePatterns = [
     "src/llm/anthropic-agent-provider.ts",
+    "src/cli.ts",
+    "src/driver/run.ts",
     "demo/",
     "scripts/",
+    "**/fixtures/**",
 ]
 onlyFailures = true
 timeout = 5

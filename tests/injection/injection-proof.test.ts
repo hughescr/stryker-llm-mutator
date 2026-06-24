@@ -147,7 +147,12 @@ describe('M0 injection proof — HALF 1: registry monkeypatch (in-process, Bun)'
     it('defaults to the heuristicMutators set in augment mode', () => {
         const result = injectMutators();
         expect(result.mode).toBe('augment');
-        expect(result.injectedNames).toEqual(['NumberLiteralValue']);
+        // The default set is the full P1 heuristic barrel (grows per milestone).
+        expect(result.injectedNames).toEqual([
+            'NumberLiteralValue',
+            'BoundaryOffByOne',
+            'FallbackOperandSubstitution',
+        ]);
         expect(allMutators.some(m => m.name === 'NumberLiteralValue')).toBe(true);
     });
 });
