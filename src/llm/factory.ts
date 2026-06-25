@@ -42,7 +42,19 @@ import type { LlmMutatorConfig } from '../config';
 export function createProvider(config: LlmMutatorConfig): LLMProvider {
     switch (config.provider) {
         case 'anthropic-agent-sdk':
-            return new AnthropicAgentProvider({ model: config.model });
+            // Fast production combo (≈5-6x faster, measured live: ~6.6s vs ~50s
+            // baseline, candidates valid every iteration): `thinking: 'disabled'`
+            // drops the SDK's default deep-reasoning, and `outputMode: 'prompt'`
+            // swaps the multi-turn json_schema emit/validate loop for a single-turn
+            // prompt-and-parse on the same subscription path. Trades reasoning depth
+            // for latency — fine for the MECHANICAL propose task. Isolation +
+            // connector-disable are already the provider's defaults (true), so we
+            // don't pass them here.
+            return new AnthropicAgentProvider({
+                model: config.model,
+                thinking: { type: 'disabled' },
+                outputMode: 'prompt',
+            });
         case 'mock':
             return new MockProvider();
         case 'anthropic-api':
