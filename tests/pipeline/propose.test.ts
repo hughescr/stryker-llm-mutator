@@ -278,7 +278,9 @@ describe('propose — node-alignment drop conditions', () => {
 
         expect(replacements).toHaveLength(0);
         expect(dropped).toHaveLength(1);
-        expect(dropped[0]?.reason).toContain('not-found');
+        expect(dropped[0]?.reason).toContain('not found verbatim');
+        // The reason interpolates the ACTUAL sub-expression, not the word "original".
+        expect(dropped[0]?.reason).toContain('x + y');
         expect(dropped[0]?.fileName).toBe('src/calc.ts');
     });
 
@@ -303,6 +305,8 @@ describe('propose — node-alignment drop conditions', () => {
         expect(replacements).toHaveLength(0);
         expect(dropped).toHaveLength(1);
         expect(dropped[0]?.reason).toContain('ambiguous');
+        // The reason interpolates the ACTUAL sub-expression, not the word "original".
+        expect(dropped[0]?.reason).toContain('`a`');
     });
 
     it('DROPS a candidate that does not align to any single node (non-node-aligned)', async () => {
@@ -318,7 +322,9 @@ describe('propose — node-alignment drop conditions', () => {
 
         expect(replacements).toHaveLength(0);
         expect(dropped).toHaveLength(1);
-        expect(dropped[0]?.reason).toContain('non-node-aligned');
+        expect(dropped[0]?.reason).toContain('crosses node boundaries');
+        // The reason interpolates the ACTUAL sub-expression, not the word "original".
+        expect(dropped[0]?.reason).toContain('b ? a');
     });
 
     it('DROPS a candidate that aligns to a statement-shaped node (not-an-expression)', async () => {
@@ -339,7 +345,7 @@ describe('propose — node-alignment drop conditions', () => {
 
         expect(replacements).toHaveLength(0);
         expect(dropped).toHaveLength(1);
-        expect(dropped[0]?.reason).toContain('not-an-expression');
+        expect(dropped[0]?.reason).toContain('aligns to a statement, not an expression');
     });
 
     it('keeps the alignable candidates and drops only the failing ones', async () => {
@@ -355,7 +361,51 @@ describe('propose — node-alignment drop conditions', () => {
         expect(replacements).toHaveLength(1);
         expect(replacements[0]?.mutatorName).toBe(`${PROPOSE_MUTATOR_PREFIX}/ok`);
         expect(dropped).toHaveLength(1);
-        expect(dropped[0]?.reason).toContain('not-found');
+        expect(dropped[0]?.reason).toContain('not found verbatim');
+    });
+
+    it('tallies dropCounts by TYPED reason and never echoes the literal word "original"', async () => {
+        // Two not-found + one not-an-expression → typed buckets, no static "original".
+        const provider = makeMockProvider({
+            candidates: [
+                { original: 'x + y', replacement: 'x - y', mutatorTag: 'a', rationale: 'n' },
+                { original: 'p * q', replacement: 'p / q', mutatorTag: 'b', rationale: 'n' },
+                {
+                    original: 'return a > b ? a : b;',
+                    replacement: 'return b;',
+                    mutatorTag: 'c',
+                    rationale: 'n',
+                },
+            ],
+        });
+
+        const { dropped, dropCounts } = await propose(provider, TARGET);
+
+        expect(dropCounts).toEqual({ 'not-found': 2, 'not-an-expression': 1 });
+        // Every reason interpolates the REAL sub-expression — the defective static
+        // table hardcoded `"original"`, which must no longer appear.
+        expect(dropped.every(d => !d.reason.includes('"original"'))).toBe(true);
+        expect(dropped.some(d => d.reason.includes('x + y'))).toBe(true);
+        expect(dropped.some(d => d.reason.includes('p * q'))).toBe(true);
+    });
+
+    it('truncates a pathological (long) sub-expression in the drop reason', async () => {
+        // A not-found `original` longer than the 60-char cap is clipped + ellipsised
+        // so one bad candidate cannot blow up a report line.
+        const longExpr = `someVeryLongIdentifierName + ${'x'.repeat(80)}`;
+        const provider = makeMockProvider({
+            candidates: [
+                { original: longExpr, replacement: 'y', mutatorTag: 'big', rationale: 'n' },
+            ],
+        });
+
+        const { dropped } = await propose(provider, TARGET);
+
+        expect(dropped).toHaveLength(1);
+        expect(dropped[0]?.reason).toContain('…');
+        // Clipped to the prefix; the full 80-x tail is NOT present.
+        expect(dropped[0]?.reason).toContain('someVeryLongIdentifierName');
+        expect(dropped[0]?.reason).not.toContain('x'.repeat(80));
     });
 
     it('falls back to spanText as the file source when offsets are omitted', async () => {

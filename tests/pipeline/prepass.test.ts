@@ -173,7 +173,7 @@ describe('runPrePass', () => {
         expect(result.dropped.some(d => d.replacement === '(a + 1)')).toBe(true);
     });
 
-    it('records node-alignment drops (not-found / not-an-expression) in the drop log + notes them', async () => {
+    it('records node-alignment drops (not-found / not-an-expression) in the drop log + rolls them up', async () => {
         // One candidate aligns cleanly; one references an `original` absent from the
         // function (not-found); one aligns to the ReturnStatement (not-an-expression).
         const inner = new MockProvider({
@@ -192,11 +192,95 @@ describe('runPrePass', () => {
             log: l => lines.push(l),
         });
         expect(result.survivors.map(r => r.replacement)).toEqual(['a - 1']);
-        // Both alignment drops are accounted in the run drop log.
-        expect(result.dropped.some(d => d.reason.includes('not-found'))).toBe(true);
-        expect(result.dropped.some(d => d.reason.includes('not-an-expression'))).toBe(true);
-        // And surfaced to the log sink.
-        expect(lines.some(l => l.includes('node-alignment drop'))).toBe(true);
+        // Both alignment drops are accounted in the run drop log (the JSON report),
+        // with the ACTUAL sub-expression interpolated (not the literal "original").
+        expect(result.dropped.some(d => d.reason.includes('not found verbatim'))).toBe(true);
+        expect(result.dropped.some(d => d.reason.includes('z + 9'))).toBe(true);
+        expect(
+            result.dropped.some(d => d.reason.includes('aligns to a statement, not an expression')),
+        ).toBe(true);
+        // The per-candidate spam is GONE: no `node-alignment drop` line on stdout.
+        expect(lines.some(l => l.includes('node-alignment drop'))).toBe(false);
+        // Instead, ONE rolled-up per-function summary: 2 drops of 3 candidates.
+        const summary = lines.filter(l => l.includes('— dropped '));
+        expect(summary).toHaveLength(1);
+        expect(summary[0]).toContain('a.ts:1 — dropped 2/3');
+        expect(summary[0]).toContain('1 statement');
+        expect(summary[0]).toContain('1 not-found');
+    });
+
+    it('emits ONE per-function drop summary with M/T + non-zero buckets in fixed order', async () => {
+        // 1 survivor + drops across every node-alignment category so the bucket
+        // ORDER (unaligned, statement, ambiguous, not-found) can be asserted. The
+        // function has two `a`s so a bare `a` is ambiguous.
+        const fn = 'function f(a) {\n    return a > a ? a : 0;\n}';
+        const inner = new MockProvider({
+            responder: () => ({
+                candidates: [
+                    candidate('a < a ? a : 0', 'ok', 'a > a ? a : 0'), // aligns → survives
+                    candidate('a ? a', 'cross', 'a ? a'), // crosses nodes → non-node-aligned
+                    candidate('return 0;', 'stmt', 'return a > a ? a : 0;'), // → not-an-expression
+                    candidate('b', 'amb', 'a'), // appears twice → ambiguous
+                    candidate('z - 1', 'gone', 'z + 9'), // absent → not-found
+                ],
+            }),
+            costUsd: 0,
+        });
+        const lines: string[] = [];
+        await runPrePass(budgeted(inner), [target('/abs/h.ts', 117, fn)], cfg(), {
+            cost,
+            log: l => lines.push(l),
+        });
+        const summary = lines.filter(l => l.includes('— dropped '));
+        expect(summary).toHaveLength(1);
+        // 4 drops of 5 candidates; buckets in the fixed order, each non-zero once.
+        expect(summary[0]).toBe(
+            'stryker-llm: h.ts:118 — dropped 4/5 (1 unaligned, 1 statement, 1 ambiguous, 1 not-found)',
+        );
+    });
+
+    it('folds near-equivalent drops into the summary as an `equivalent` bucket (no per-drop spam)', async () => {
+        // One real survivor + one near-equivalent (parens-only) drop. The
+        // near-equivalent detail must NOT spam stdout; it folds into the summary.
+        const inner = new MockProvider({
+            responder: () => ({
+                candidates: [
+                    candidate('a - 1', 'real', 'a + 1'), // survives
+                    candidate('(a + 1)', 'parens', 'a + 1'), // near-equivalent → dropped
+                ],
+            }),
+            costUsd: 0,
+        });
+        const lines: string[] = [];
+        const result = await runPrePass(budgeted(inner), [target('/abs/a.ts', 0)], cfg(), {
+            cost,
+            log: l => lines.push(l),
+        });
+        expect(result.survivors.map(r => r.replacement)).toEqual(['a - 1']);
+        // Detail still in the report.
+        expect(result.dropped.some(d => d.replacement === '(a + 1)')).toBe(true);
+        // No per-candidate near-equivalent line on stdout.
+        expect(lines.some(l => l.includes('near-equivalent drop'))).toBe(false);
+        // Folded into the single summary line.
+        const summary = lines.filter(l => l.includes('— dropped '));
+        expect(summary).toHaveLength(1);
+        // 2 candidates returned, both aligned; 1 of them dropped near-equivalent.
+        expect(summary[0]).toContain('a.ts:1 — dropped 1/2 (1 equivalent)');
+    });
+
+    it('emits NO drop summary line for a call with zero drops', async () => {
+        const inner = new MockProvider({
+            responder: () => ({ candidates: [candidate('a - 1', 'real', 'a + 1')] }),
+            costUsd: 0,
+        });
+        const lines: string[] = [];
+        await runPrePass(budgeted(inner), [target('/abs/a.ts', 0)], cfg(), {
+            cost,
+            log: l => lines.push(l),
+        });
+        expect(lines.some(l => l.includes('— dropped '))).toBe(false);
+        // The heartbeat still fires (so we know the call ran).
+        expect(lines.some(l => l.includes('pre-pass ['))).toBe(true);
     });
 
     it('STOPS on the cost ceiling and KEEPS the partial survivors', async () => {

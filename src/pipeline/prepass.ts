@@ -26,9 +26,10 @@
 import { basename } from 'node:path';
 
 import { applyFilters, dedupKey } from './filters';
-import { type DropLogger, filterNearEquivalent } from './near-equivalence';
+import { filterNearEquivalent } from './near-equivalence';
 import { type DroppedReplacement } from './llm-map';
 import { propose, type ProposeResult, type ProposeTarget } from './propose';
+import type { AlignDropReason } from './range-align';
 import { BudgetExceededError } from './budgeted-provider';
 import type { CostAccumulator, CostSnapshot, LLMProvider } from '../llm/index';
 import type { LlmMutatorConfig } from '../config';
@@ -107,17 +108,19 @@ export class RollingYield {
 /**
  * Filter one call's raw replacements through `applyFilters` + the conservative
  * near-equivalence pass, returning the survivors and the near-equivalent drops.
+ *
+ * The near-equivalence pass is run WITHOUT a stdout `DropLogger`: its
+ * per-candidate lines were a console flood source. The drops are still collected
+ * here as {@link DroppedReplacement}s (so the JSON report carries them) and their
+ * COUNT is rolled into the caller's per-function drop summary.
  */
-function filterCall(
-    raw: readonly Replacement[],
-    dropLog: DropLogger | undefined,
-): { survivors: Replacement[]; dropped: DroppedReplacement[] } {
+function filterCall(raw: readonly Replacement[]): {
+    survivors: Replacement[];
+    dropped: DroppedReplacement[];
+} {
     const dropped: DroppedReplacement[] = [];
     const afterCheap = applyFilters(raw);
-    const survivors = filterNearEquivalent(
-        afterCheap,
-        dropLog === undefined ? {} : { log: dropLog },
-    );
+    const survivors = filterNearEquivalent(afterCheap);
     // Record near-equivalent drops as DroppedReplacement entries for the run log.
     const survivorKeys = new Set(survivors.map(dedupKey));
     for (const r of afterCheap) {
@@ -163,6 +166,69 @@ function logHeartbeat(
 }
 
 /**
+ * Emit the per-function DROP SUMMARY: ONE rolled-up line replacing the old
+ * per-candidate `node-alignment drop` / `near-equivalent drop` stdout spam. The
+ * full per-drop detail still lives in the JSON report (`state.dropped`); this is
+ * just the console roll-up. No-op when no `log` sink is wired OR when this call
+ * dropped nothing.
+ *
+ * Format: `stryker-llm: file:line — dropped M/T (buckets)` where `M` is this
+ * call's total drops (node-alignment + near-equivalent), `T` is every candidate
+ * the model returned for this call, and `buckets` lists ONLY the non-zero
+ * categories in this fixed order: unaligned, statement, ambiguous, not-found,
+ * equivalent.
+ *
+ * `replacements` is the count of node-ALIGNED candidates (`proposed.replacements`)
+ * — near-equivalent drops are a SUBSET of those, so `T = replacements + alignDrops`
+ * (NOT `+ equivalent`, which would double-count the near-equivalent candidates).
+ */
+function logDropSummary(
+    log: PrePassLogger | undefined,
+    info: {
+        target: ProposeTarget;
+        replacements: number;
+        dropCounts: Partial<Record<AlignDropReason, number>>;
+        equivalent: number;
+    },
+): void {
+    if (log === undefined) {
+        return;
+    }
+    const { dropCounts, equivalent } = info;
+    const alignDrops =
+        (dropCounts['non-node-aligned'] ?? 0) +
+        (dropCounts['not-an-expression'] ?? 0) +
+        (dropCounts.ambiguous ?? 0) +
+        (dropCounts['not-found'] ?? 0);
+    const dropped = alignDrops + equivalent;
+    if (dropped === 0) {
+        return;
+    }
+    // Near-equivalent drops are already inside `info.replacements`, so the model's
+    // candidate count for this call is `replacements + alignDrops` (no +equivalent).
+    const total = info.replacements + alignDrops;
+
+    // Fixed bucket order; only non-zero categories are listed.
+    const buckets: string[] = [];
+    const add = (count: number, label: string): void => {
+        if (count > 0) {
+            buckets.push(`${String(count)} ${label}`);
+        }
+    };
+    add(dropCounts['non-node-aligned'] ?? 0, 'unaligned');
+    add(dropCounts['not-an-expression'] ?? 0, 'statement');
+    add(dropCounts.ambiguous ?? 0, 'ambiguous');
+    add(dropCounts['not-found'] ?? 0, 'not-found');
+    add(equivalent, 'equivalent');
+
+    log(
+        `stryker-llm: ${basename(info.target.fileName)}:` +
+            `${String(info.target.range.start.line + 1)} — ` +
+            `dropped ${String(dropped)}/${String(total)} (${buckets.join(', ')})`,
+    );
+}
+
+/**
  * The mutable accumulators threaded through {@link processProposeResult} for one
  * wave's worth of settled results. `runPrePass` owns these for the whole run;
  * the helper reads + mutates them in place so the per-result logic is identical
@@ -203,13 +269,16 @@ function processProposeResult(
     state.callsIssued += 1;
 
     // Node-alignment drops (not-found / ambiguous / non-node-aligned /
-    // not-an-expression) join the run's drop log alongside near-equiv drops.
+    // not-an-expression) join the run's drop log for the JSON report. Their
+    // per-candidate detail stays OFF stdout — the one-line per-function summary
+    // below rolls them up by typed category instead of flooding the console.
     state.dropped.push(...proposed.dropped);
-    for (const drop of proposed.dropped) {
-        log?.(`node-alignment drop ${drop.fileName}: ${drop.reason}`);
-    }
 
-    const filtered = filterCall(proposed.replacements, log);
+    // Near-equivalence detail also stays OFF stdout (no `log` DropLogger): its
+    // per-candidate lines were a second flood source. We keep the drops in
+    // `state.dropped` (so the report carries them) and fold their count into the
+    // same per-function summary as the `equivalent` bucket.
+    const filtered = filterCall(proposed.replacements);
     state.dropped.push(...filtered.dropped);
 
     let newThisCall = 0;
@@ -239,6 +308,16 @@ function processProposeResult(
         newThisCall,
         survivors: state.survivors.length,
         cost: ctx.cost,
+    });
+
+    // Per-function DROP SUMMARY: ONE rolled-up line (right after the heartbeat)
+    // replacing the old per-candidate spam. Emitted only when this call dropped
+    // at least one candidate; buckets by typed category, non-zero only.
+    logDropSummary(log, {
+        target,
+        replacements: proposed.replacements.length,
+        dropCounts: proposed.dropCounts,
+        equivalent: filtered.dropped.length,
     });
 
     if (state.rolling.isFull() && state.rolling.mean() < diminishingReturns.minYieldPerCall) {

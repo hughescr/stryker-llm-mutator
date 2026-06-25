@@ -219,17 +219,52 @@ export interface ProposeResult {
     replacements: Replacement[];
     /** Candidates dropped because their `original` could not be node-aligned. */
     dropped: DroppedReplacement[];
+    /**
+     * Per-TYPED-reason tally of the node-alignment drops in {@link dropped}. The
+     * typed {@link AlignDropReason} is lost once each drop is flattened into the
+     * human-readable `reason` string, so it is preserved here for the pre-pass's
+     * per-function drop summary (which buckets by category WITHOUT string-parsing
+     * the reason text). Only reasons that actually occurred carry a key.
+     */
+    dropCounts: Partial<Record<AlignDropReason, number>>;
 }
 
-/** Human-readable reason text per align-drop reason, for the run's drop log. */
-const ALIGN_DROP_REASON_TEXT: Record<AlignDropReason, string> = {
-    'not-found': 'sub-expression "original" not found verbatim in the enclosing function',
-    ambiguous: 'sub-expression "original" appears more than once in the function (ambiguous)',
-    'non-node-aligned':
-        'sub-expression "original" does not align exactly to a single AST node (crosses node boundaries)',
-    'not-an-expression':
-        'sub-expression "original" aligns to a non-expression (statement-shaped) node',
-};
+/** Cap on how much of a candidate's sub-expression we echo into a drop `reason`. */
+const SNIPPET_MAX_LENGTH = 60;
+
+/**
+ * Truncate a candidate's sub-expression for inclusion in a drop `reason`, so a
+ * pathological whole-function `original` cannot blow up a report line. Collapses
+ * to a single line and appends an ellipsis when clipped.
+ */
+function clipSnippet(original: string): string {
+    const oneLine = original.replace(/\s+/g, ' ').trim();
+    if (oneLine.length <= SNIPPET_MAX_LENGTH) {
+        return oneLine;
+    }
+    return `${oneLine.slice(0, SNIPPET_MAX_LENGTH)}…`;
+}
+
+/**
+ * Build a human-readable, self-contained drop `reason` for one align-drop reason,
+ * interpolating the candidate's ACTUAL (clipped) sub-expression. Stored on
+ * {@link DroppedReplacement.reason} so the JSON report carries the full detail.
+ * No "node-alignment drop" prefix — the pre-pass's per-function summary already
+ * frames these as drops.
+ */
+function alignDropReasonText(reason: AlignDropReason, original: string): string {
+    const snippet = clipSnippet(original);
+    switch (reason) {
+        case 'not-found':
+            return `original \`${snippet}\` not found verbatim in the enclosing function`;
+        case 'ambiguous':
+            return `original \`${snippet}\` appears more than once in the function (ambiguous)`;
+        case 'non-node-aligned':
+            return `original \`${snippet}\` crosses node boundaries (no single AST node)`;
+        case 'not-an-expression':
+            return `original \`${snippet}\` aligns to a statement, not an expression`;
+    }
+}
 
 /**
  * Resolve the file source + function offsets a target uses for node-alignment.
@@ -260,7 +295,7 @@ function resolveAlignInputs(target: ProposeTarget): {
 function toReplacement(
     target: ProposeTarget,
     candidate: RawCandidate,
-): Replacement | DroppedReplacement {
+): Replacement | { drop: DroppedReplacement; category: AlignDropReason } {
     const tag = candidate.mutatorTag.trim();
     const mutatorName =
         tag.length > 0 ? `${PROPOSE_MUTATOR_PREFIX}/${tag}` : PROPOSE_MUTATOR_PREFIX;
@@ -269,10 +304,13 @@ function toReplacement(
     const aligned = alignCandidateRange(fileContent, start, end, candidate.original);
     if ('dropped' in aligned) {
         return {
-            fileName: target.fileName,
-            range: target.range,
-            replacement: candidate.replacement,
-            reason: `node-alignment drop (${aligned.reason}): ${ALIGN_DROP_REASON_TEXT[aligned.reason]}`,
+            category: aligned.reason,
+            drop: {
+                fileName: target.fileName,
+                range: target.range,
+                replacement: candidate.replacement,
+                reason: alignDropReasonText(aligned.reason, candidate.original),
+            },
         };
     }
     return {
@@ -330,13 +368,15 @@ export async function propose(
     const candidates = result.value.candidates.slice(0, maxCandidates);
     const replacements: Replacement[] = [];
     const dropped: DroppedReplacement[] = [];
+    const dropCounts: Partial<Record<AlignDropReason, number>> = {};
     for (const candidate of candidates) {
         const mapped = toReplacement(target, candidate);
-        if ('reason' in mapped) {
-            dropped.push(mapped);
+        if ('drop' in mapped) {
+            dropped.push(mapped.drop);
+            dropCounts[mapped.category] = (dropCounts[mapped.category] ?? 0) + 1;
         } else {
             replacements.push(mapped);
         }
     }
-    return { replacements, dropped };
+    return { replacements, dropped, dropCounts };
 }
