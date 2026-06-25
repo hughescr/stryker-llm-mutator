@@ -81,6 +81,25 @@ export interface AnthropicAgentProviderOptions {
      * synthetic env that has/lacks `ANTHROPIC_API_KEY`.
      */
     env?: Record<string, string | undefined>;
+    /**
+     * Run the Agent SDK HERMETICALLY. DEFAULT TRUE — this is the permanent fix.
+     *
+     * Each `query()` call spawns a `claude-code` subprocess, and by the SDK's
+     * defaults that subprocess loads ALL filesystem settings + every project /
+     * user `CLAUDE.md` and connects to every configured MCP server BEFORE it
+     * generates — pure per-call startup overhead this provider never needs (it
+     * does one pure schema-constrained generation with the side-effecting tools
+     * already banned). When `true` we pass `settingSources: []`, `mcpServers:
+     * {}`, and `strictMcpConfig: true` so NO settings, NO `CLAUDE.md`, and NO MCP
+     * servers load — eliminating that config/MCP startup cost. The
+     * structured-output (`outputFormat: json_schema`) path is UNAFFECTED.
+     *
+     * When `false`, those keys are omitted and the SDK's defaults load all
+     * settings + MCP again (the original, slow behavior). This escape hatch
+     * exists ONLY for the benchmark/comparison driver (`scripts/bench-isolation.ts`);
+     * production never sets it, so isolation is simply on.
+     */
+    isolate?: boolean;
 }
 
 /**
@@ -236,11 +255,13 @@ export class AnthropicAgentProvider implements LLMProvider {
     readonly #model: string;
     readonly #oauthToken?: string;
     readonly #env: Record<string, string | undefined>;
+    readonly #isolate: boolean;
 
     constructor(options: AnthropicAgentProviderOptions = {}) {
         this.#model = options.model ?? DEFAULT_MODEL;
         this.#oauthToken = options.oauthToken;
         this.#env = options.env ?? process.env;
+        this.#isolate = options.isolate ?? true;
     }
 
     /**
@@ -250,6 +271,15 @@ export class AnthropicAgentProvider implements LLMProvider {
      * side-effecting tools so the agent cannot touch the filesystem or run
      * commands — it can only generate.
      *
+     * ISOLATION: when `this.#isolate` is true (the default), we additionally pass
+     * `settingSources: []`, `mcpServers: {}`, and `strictMcpConfig: true` so the
+     * spawned `claude-code` subprocess runs HERMETIC — it loads NO filesystem
+     * settings, NO `CLAUDE.md`, and connects to NO MCP servers — eliminating the
+     * per-call config/MCP startup overhead. When false those three keys are
+     * omitted and the SDK's defaults load all settings + MCP (the original, slow
+     * behavior, kept only for the benchmark). The `outputFormat: json_schema`
+     * structured-output path is unaffected either way.
+     *
      * Pure (no network) and exposed on the instance only via {@link generate};
      * kept as a method so the env/auth wiring is exercised by the same code path
      * the live call uses.
@@ -257,6 +287,11 @@ export class AnthropicAgentProvider implements LLMProvider {
     #buildOptions(request: ProviderRequest): Options {
         return {
             model: request.model ?? this.#model,
+            // Hermetic isolation (default): suppress filesystem settings +
+            // CLAUDE.md (settingSources: []) and all MCP servers (mcpServers: {}
+            // + strictMcpConfig: true) so no per-call config/MCP startup runs.
+            // Omitted entirely when isolation is off (the slow benchmark path).
+            ...(this.#isolate ? { settingSources: [], mcpServers: {}, strictMcpConfig: true } : {}),
             // JSON-schema structured-output mode: the SDK asks the model to emit
             // an object matching this schema and re-prompts on mismatch.
             outputFormat: { type: 'json_schema', schema: request.schema },
