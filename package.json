@@ -1,6 +1,6 @@
 {
   "name": "@hughescr/stryker-llm-mutator",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "LLM-driven mutation generator plugin for Stryker, producing a wider variety of mutants than the built-in formulaic mutators",
   "keywords": [
     "stryker",
