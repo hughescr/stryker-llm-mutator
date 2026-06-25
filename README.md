@@ -73,7 +73,10 @@ export default await withLlmMutators({
     ...strykerConfig,
     llmMutator: {
         heuristics: { enabled: true },
-        dynamicLLM: { enabled: true },     // costs money + needs credentials
+        dynamicLLM: {
+            enabled: true,                 // costs money + needs credentials
+            // parallelBatches: 4,         // Haiku requests per wave; >1 speeds cold runs (see caveats)
+        },
         provider: 'anthropic-agent-sdk',   // see Authentication below
         model:    'claude-haiku-4-5',      // default
         cacheDir: '.stryker-llm-cache',    // commit/restore for warm, free CI
@@ -138,9 +141,12 @@ Everything lives under `llmMutator`. Both switches default such that an empty `l
 | `dynamicLLM.enabled` | `false` | The targeted LLM pre‑pass + injected `llm` mutator. Costs money + needs credentials. |
 | `dynamicLLM.frozen` | `false` | Cache‑only deterministic re‑score (a cache miss yields no mutant, no network) — the CI gate. |
 | `dynamicLLM.budget.maxCostUsd` | `5` | **Hard** dollar abort, checked between calls. |
+| `dynamicLLM.parallelBatches` | `1` | Number of Haiku requests issued concurrently per wave; >1 speeds cold runs (see caveats). |
 | `provider` | `anthropic-agent-sdk` | LLM provider (only `anthropic-agent-sdk` + `mock` implemented today). |
 | `model` | `claude-haiku-4-5` | Model id. |
 | `cacheDir` | `.stryker-llm-cache` | Content‑addressed cache. Commit/restore it for warm, free CI runs. |
+
+**On `dynamicLLM.parallelBatches`.** Default `1` is the original strictly sequential pre‑pass. Raising it slices the EV‑ranked targets into consecutive waves of that size and fires a whole wave of Haiku `propose()` calls at once, which overlaps the model round‑trips and speeds up **cold** (cache‑miss) runs. Honest, bounded tradeoffs: the hard `maxCostUsd`/`maxLlmCallsPerRun` ceilings can **overshoot by up to `parallelBatches − 1` calls** (that many may be in flight when a ceiling trips — they're only checked between calls), the diminishing‑returns stop is evaluated **per wave** so it may run up to `parallelBatches − 1` calls past the sequential stop point, and very high values may hit the provider's **API rate limits**. There is no hard maximum — pick a value your quota tolerates.
 
 The 14 heuristic operators (allow‑list names for `heuristics.operators`): **P1** `NumberLiteralValue`, `BoundaryOffByOne`, `FallbackOperandSubstitution`; **P2** `ComparisonBoundaryShift`, `CallArgumentTweak`, `AwaitDrop`; **P3** `EarlyReturnInjection`, `SpreadOperandDrop`, `ArrayMethodSwap`, `PromiseCombinatorSwap`; **P4** `DefaultParamValueTweak`, `OptionalChainForce`, `StringMethodArgSwap`, `TernaryBranchSwap`. (Some — `AwaitDrop`, the type‑changing method swaps, `OptionalChainForce` — honestly produce mutants that score as `error`/`compileError` rather than `survived`; a build‑time‑caught mutant is still a kill.)
 

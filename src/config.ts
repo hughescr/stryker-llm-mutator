@@ -198,6 +198,27 @@ export const llmMutatorConfigSchema = z
                         minYieldPerCall: z.number().min(0).default(0.1),
                     })
                     .prefault({}),
+                /**
+                 * Number of `propose()` requests issued CONCURRENTLY per WAVE of
+                 * the cold-cache pre-pass. Default `1` = the original strictly
+                 * SEQUENTIAL behavior (one target → process → check stop → next),
+                 * which stays bit-for-bit identical. Raising it slices the
+                 * EV-ranked targets into consecutive waves of this size and fires
+                 * a whole wave of `propose()` calls at once, which speeds up COLD
+                 * (cache-miss) runs by overlapping the model round-trips. The
+                 * tradeoffs are honest and bounded:
+                 *   (a) the HARD `maxCostUsd` / `maxLlmCallsPerRun` ceilings can
+                 *       OVERSHOOT by up to `parallelBatches - 1` calls — that many
+                 *       requests may already be in flight when a ceiling trips
+                 *       (the budgeted provider only checks BETWEEN calls);
+                 *   (b) the diminishing-returns stop is evaluated PER WAVE, so the
+                 *       pre-pass may run up to `parallelBatches - 1` calls past the
+                 *       strictly-sequential stop point;
+                 *   (c) very high values may hit the provider's API RATE LIMITS.
+                 * There is no hard maximum (matching the schema's `.positive()`
+                 * convention); pick a value your provider quota tolerates.
+                 */
+                parallelBatches: z.number().int().positive().default(1),
             })
             .prefault({}),
     })

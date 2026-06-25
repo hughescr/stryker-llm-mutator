@@ -23,6 +23,8 @@
  * targeting.
  */
 
+import { basename } from 'node:path';
+
 import { applyFilters, dedupKey } from './filters';
 import { type DropLogger, filterNearEquivalent } from './near-equivalence';
 import { type DroppedReplacement } from './llm-map';
@@ -132,12 +134,140 @@ function filterCall(
 }
 
 /**
+ * Emit the per-call progress heartbeat (a no-op when no `log` sink is wired). A
+ * compact one-liner — `[n/total] file:line — +N cand, T total, $cost` — prefixed
+ * `stryker-llm:` to read consistently with the wrapper's other summary lines.
+ * Extracted so `runPrePass` stays under the lint complexity cap; PURELY additive.
+ */
+function logHeartbeat(
+    log: PrePassLogger | undefined,
+    info: {
+        callsIssued: number;
+        total: number;
+        target: ProposeTarget;
+        newThisCall: number;
+        survivors: number;
+        cost: CostAccumulator;
+    },
+): void {
+    if (log === undefined) {
+        return;
+    }
+    const { totalUsd } = info.cost.snapshot();
+    log(
+        `stryker-llm: pre-pass [${String(info.callsIssued)}/${String(info.total)}] ` +
+            `${basename(info.target.fileName)}:${String(info.target.range.start.line + 1)} — ` +
+            `+${String(info.newThisCall)} cand, ${String(info.survivors)} total, ` +
+            `$${totalUsd.toFixed(2)}`,
+    );
+}
+
+/**
+ * The mutable accumulators threaded through {@link processProposeResult} for one
+ * wave's worth of settled results. `runPrePass` owns these for the whole run;
+ * the helper reads + mutates them in place so the per-result logic is identical
+ * whether the wave was sequential (`parallelBatches === 1`) or concurrent.
+ */
+interface PrePassState {
+    survivors: Replacement[];
+    dropped: DroppedReplacement[];
+    seenIdentities: Set<string>;
+    seenTags: Set<string>;
+    rolling: RollingYield;
+    /** Bumped once per processed SUCCESSFUL result, mirroring the old per-call counter. */
+    callsIssued: number;
+}
+
+/**
+ * Process ONE successful `propose()` result in array order, applying the EXACT
+ * per-call logic the sequential loop used: record node-alignment drops, filter +
+ * near-equiv, dedup new survivors + tag-novelty into the shared accumulators,
+ * push the per-call yield, emit the heartbeat, then evaluate the
+ * diminishing-returns floor. Mutates {@link PrePassState} in place and returns
+ * the diminishing-returns stop reason if the floor tripped (else `undefined`).
+ * Extracted so `runPrePass` stays under the lint complexity cap; the behavior is
+ * byte-for-byte the original inner loop body.
+ */
+function processProposeResult(
+    proposed: ProposeResult,
+    target: ProposeTarget,
+    state: PrePassState,
+    ctx: {
+        total: number;
+        cost: CostAccumulator;
+        log: PrePassLogger | undefined;
+        diminishingReturns: LlmMutatorConfig['dynamicLLM']['diminishingReturns'];
+    },
+): PrePassStopReason | undefined {
+    const { log, diminishingReturns } = ctx;
+    state.callsIssued += 1;
+
+    // Node-alignment drops (not-found / ambiguous / non-node-aligned /
+    // not-an-expression) join the run's drop log alongside near-equiv drops.
+    state.dropped.push(...proposed.dropped);
+    for (const drop of proposed.dropped) {
+        log?.(`node-alignment drop ${drop.fileName}: ${drop.reason}`);
+    }
+
+    const filtered = filterCall(proposed.replacements, log);
+    state.dropped.push(...filtered.dropped);
+
+    let newThisCall = 0;
+    for (const r of filtered.survivors) {
+        const identity = dedupKey(r);
+        if (!state.seenIdentities.has(identity)) {
+            state.seenIdentities.add(identity);
+            state.survivors.push(r);
+            newThisCall += 1;
+        }
+        if (!state.seenTags.has(r.mutatorName)) {
+            state.seenTags.add(r.mutatorName);
+            newThisCall += 1;
+        }
+    }
+
+    state.rolling.push(newThisCall);
+
+    // Per-call PROGRESS HEARTBEAT: one compact line so a long cold-cache
+    // run shows liveness + running cost instead of sitting silent between
+    // the Gate1/2 line and the final summary. Purely additive — no control
+    // flow depends on it. `cost.snapshot()` just reads two fields (cheap).
+    logHeartbeat(log, {
+        callsIssued: state.callsIssued,
+        total: ctx.total,
+        target,
+        newThisCall,
+        survivors: state.survivors.length,
+        cost: ctx.cost,
+    });
+
+    if (state.rolling.isFull() && state.rolling.mean() < diminishingReturns.minYieldPerCall) {
+        log?.(
+            `Pre-pass STOP: diminishing returns (window mean ` +
+                `${state.rolling.mean().toFixed(3)} < ${String(diminishingReturns.minYieldPerCall)})`,
+        );
+        return 'diminishing-returns';
+    }
+    return undefined;
+}
+
+/**
  * Run the dynamic-LLM pre-pass over the EV-ranked targets. Returns the filtered
  * survivors plus the cost snapshot, drop log, stop reason, and call count.
  *
+ * The targets are processed in consecutive WAVES of `dynamicLLM.parallelBatches`
+ * (default 1). Within a wave all `propose()` calls are issued CONCURRENTLY via
+ * `Promise.allSettled`; the settled results are then processed strictly IN ARRAY
+ * ORDER so the survivor set + heartbeat sequence stay deterministic. Waves
+ * themselves are sequential: the budgeted provider only checks the ceiling
+ * BETWEEN calls and diminishing-returns is evaluated PER WAVE, so a cost/call
+ * ceiling may overshoot — and the diminishing-returns stop may run — by up to
+ * `parallelBatches - 1` calls. With `parallelBatches === 1` each wave is a single
+ * target, making the behavior identical to the original sequential loop.
+ *
  * @param provider The BUDGETED provider (cache + cost + ceiling enforcement).
  * @param targets EV-ranked enclosing-function targets from Gate 1/2.
- * @param config The parsed config (reads `dynamicLLM.budget` + `diminishingReturns`).
+ * @param config The parsed config (reads `dynamicLLM.budget` + `diminishingReturns` + `parallelBatches`).
  * @param deps Cost accumulator, logger, abort signal.
  */
 export async function runPrePass(
@@ -147,75 +277,69 @@ export async function runPrePass(
     deps: RunPrePassDeps,
 ): Promise<RunPrePassResult> {
     const { cost, log, signal } = deps;
-    const { budget, diminishingReturns } = config.dynamicLLM;
+    const { budget, diminishingReturns, parallelBatches } = config.dynamicLLM;
 
-    const survivors: Replacement[] = [];
-    const dropped: DroppedReplacement[] = [];
-    const seenIdentities = new Set<string>();
-    const seenTags = new Set<string>();
-    const rolling = new RollingYield(diminishingReturns.window);
+    const state: PrePassState = {
+        survivors: [],
+        dropped: [],
+        seenIdentities: new Set<string>(),
+        seenTags: new Set<string>(),
+        rolling: new RollingYield(diminishingReturns.window),
+        callsIssued: 0,
+    };
+    const ctx = { total: targets.length, cost, log, diminishingReturns };
 
     let stopReason: PrePassStopReason = 'queue-exhausted';
-    let callsIssued = 0;
+    let stop = false;
 
-    for (const target of targets) {
-        try {
-            // oxlint-disable-next-line no-await-in-loop -- sequential by design: the budgeted provider checks the ceiling BETWEEN calls, and diminishing-returns is evaluated per call.
-            const proposed: ProposeResult = await propose(provider, target, {
-                maxCandidates: budget.maxCandidatesPerFile,
-                model: config.model,
-                ...(signal === undefined ? {} : { signal }),
-            });
-            callsIssued += 1;
+    for (let i = 0; i < targets.length && !stop; i += parallelBatches) {
+        const wave = targets.slice(i, i + parallelBatches);
+        // oxlint-disable-next-line no-await-in-loop -- waves are sequential by design: ceiling + diminishing-returns are evaluated per wave.
+        const settled = await Promise.allSettled(
+            wave.map(t =>
+                propose(provider, t, {
+                    maxCandidates: budget.maxCandidatesPerFile,
+                    model: config.model,
+                    ...(signal === undefined ? {} : { signal }),
+                }),
+            ),
+        );
+        // Re-pair each settled outcome with its target so processing stays in
+        // ARRAY ORDER without an out-of-band index (settled is index-aligned to
+        // wave by construction). Deterministic regardless of completion order.
+        const results = wave.map((t, j) => ({ target: t, outcome: settled[j] }));
 
-            // Node-alignment drops (not-found / ambiguous / non-node-aligned /
-            // not-an-expression) join the run's drop log alongside near-equiv drops.
-            dropped.push(...proposed.dropped);
-            for (const drop of proposed.dropped) {
-                log?.(`node-alignment drop ${drop.fileName}: ${drop.reason}`);
+        // Process the wave's results IN ARRAY ORDER (deterministic). A rejection
+        // sets the stop flag but we STILL finish the already-completed siblings —
+        // they are paid for (and cached). A non-budget rejection propagates.
+        for (const { target, outcome } of results) {
+            if (outcome === undefined) {
+                continue;
             }
-
-            const filtered = filterCall(proposed.replacements, log);
-            dropped.push(...filtered.dropped);
-
-            let newThisCall = 0;
-            for (const r of filtered.survivors) {
-                const identity = dedupKey(r);
-                if (!seenIdentities.has(identity)) {
-                    seenIdentities.add(identity);
-                    survivors.push(r);
-                    newThisCall += 1;
+            if (outcome.status === 'fulfilled') {
+                const reason = processProposeResult(outcome.value, target, state, ctx);
+                if (reason !== undefined) {
+                    stopReason = reason;
+                    stop = true;
                 }
-                if (!seenTags.has(r.mutatorName)) {
-                    seenTags.add(r.mutatorName);
-                    newThisCall += 1;
-                }
+                continue;
             }
-
-            rolling.push(newThisCall);
-            if (rolling.isFull() && rolling.mean() < diminishingReturns.minYieldPerCall) {
-                stopReason = 'diminishing-returns';
-                log?.(
-                    `Pre-pass STOP: diminishing returns (window mean ` +
-                        `${rolling.mean().toFixed(3)} < ${String(diminishingReturns.minYieldPerCall)})`,
-                );
-                break;
-            }
-        } catch (error) {
+            const error = outcome.reason as unknown;
             if (error instanceof BudgetExceededError) {
                 stopReason = error.reason === 'maxCostUsd' ? 'cost-ceiling' : 'call-cap';
                 log?.(`Pre-pass STOP: ${error.message}`);
-                break;
+                stop = true;
+                continue;
             }
             throw error;
         }
     }
 
     return {
-        survivors,
+        survivors: state.survivors,
         cost: cost.snapshot(),
-        dropped,
+        dropped: state.dropped,
         stopReason,
-        callsIssued,
+        callsIssued: state.callsIssued,
     };
 }

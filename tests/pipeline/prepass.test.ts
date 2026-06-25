@@ -16,9 +16,10 @@ import { join } from 'node:path';
 import { llmMutatorConfigSchema, type LlmMutatorConfig } from '../../src/config';
 import { CostAccumulator, MockProvider, ResponseCache } from '../../src/llm/index';
 import { createBudgetedProvider } from '../../src/pipeline/budgeted-provider';
+import { dedupKey } from '../../src/pipeline/filters';
 import { RollingYield, runPrePass } from '../../src/pipeline/prepass';
 import type { ProposeTarget } from '../../src/pipeline/propose';
-import type { ProviderRequest } from '../../src/llm/types';
+import type { LLMProvider, ProviderRequest, ProviderResult } from '../../src/llm/types';
 import type { SourceRange } from '../../src/seam/types';
 
 function range(line: number): SourceRange {
@@ -99,7 +100,7 @@ describe('runPrePass', () => {
         await rm(dir, { recursive: true, force: true });
     });
 
-    function budgeted(inner: MockProvider, over: Record<string, unknown> = {}) {
+    function budgeted(inner: LLMProvider, over: Record<string, unknown> = {}) {
         return createBudgetedProvider(inner, {
             cache,
             cost,
@@ -307,6 +308,35 @@ describe('runPrePass', () => {
         expect(lines.some(l => l.includes('Pre-pass STOP'))).toBe(true);
     });
 
+    it('emits one progress heartbeat per successful propose call when a log is given', async () => {
+        const inner = new MockProvider({
+            responder: (request: ProviderRequest) => ({
+                candidates: [candidate(`h_${request.prompt.length} - 1`, 'dec', 'h + 1')],
+            }),
+            costUsd: 0,
+        });
+        const lines: string[] = [];
+        const targets = [
+            target('/abs/a.ts', 0, 'function ha(h) {\n    return h + 1;\n}'),
+            target('/abs/b.ts', 1, 'function hbb(h) {\n    return h + 1;\n}'),
+            target('/abs/c.ts', 2, 'function hccc(h) {\n    return h + 1;\n}'),
+        ];
+        const result = await runPrePass(budgeted(inner), targets, cfg(), {
+            cost,
+            log: l => lines.push(l),
+        });
+        const heartbeats = lines.filter(l => l.includes('pre-pass ['));
+        // One heartbeat per propose() call, all stryker-llm:-prefixed, carrying the
+        // [n/total] counter, the file basename, and the running cost.
+        expect(heartbeats).toHaveLength(result.callsIssued);
+        expect(heartbeats).toHaveLength(3);
+        expect(heartbeats.every(l => l.startsWith('stryker-llm: pre-pass ['))).toBe(true);
+        expect(heartbeats[0]).toContain('[1/3]');
+        expect(heartbeats[2]).toContain('[3/3]');
+        expect(heartbeats[0]).toContain('a.ts');
+        expect(heartbeats.every(l => l.includes('$0.00'))).toBe(true);
+    });
+
     it('re-throws a non-budget error from the provider', async () => {
         const inner = new MockProvider({
             responder: () => {
@@ -320,5 +350,120 @@ describe('runPrePass', () => {
             thrown = error;
         }
         expect((thrown as Error).message).toBe('boom');
+    });
+
+    /**
+     * A concurrency-tracking provider: each `generate` increments an in-flight
+     * counter, yields the event loop (so overlapping calls actually coexist),
+     * records the running maximum, then decrements. `maxInFlight` proves how many
+     * `propose()` calls were truly simultaneous. Unique replacement per prompt so
+     * every survivor is distinct.
+     */
+    function concurrencyProvider(): LLMProvider & { maxInFlight: number } {
+        let inFlight = 0;
+        const tracker: LLMProvider & { maxInFlight: number } = {
+            name: 'concurrency-tracker',
+            maxInFlight: 0,
+            async generate<T>(request: ProviderRequest): Promise<ProviderResult<T>> {
+                inFlight += 1;
+                tracker.maxInFlight = Math.max(tracker.maxInFlight, inFlight);
+                // Hold the call open on a real timer so every sibling in the wave
+                // reaches this point (past the async cache read) and truly overlaps
+                // before any resolves — a microtask yield is too short to observe it.
+                await new Promise<void>(resolve => {
+                    setTimeout(resolve, 10);
+                });
+                inFlight -= 1;
+                return {
+                    value: {
+                        candidates: [candidate(`p_${request.prompt.length} - 1`, 'dec', 'p + 1')],
+                    } as T,
+                    costUsd: 0,
+                    model: 'claude-haiku-4-5',
+                    cached: false,
+                };
+            },
+        };
+        return tracker;
+    }
+
+    function pTargets(n: number): ProposeTarget[] {
+        // Distinct function names → distinct prompts → distinct cache keys, each
+        // wrapping a unique `p + 1` the candidate mutates.
+        return Array.from({ length: n }, (_unused, k) =>
+            target('/abs/p.ts', k, `function f${'x'.repeat(k + 1)}(p) {\n    return p + 1;\n}`),
+        );
+    }
+
+    it('issues propose() calls CONCURRENTLY per wave (max-in-flight reaches parallelBatches)', async () => {
+        const inner = concurrencyProvider();
+        await runPrePass(budgeted(inner), pTargets(6), cfg({ parallelBatches: 3 }), { cost });
+        // Three calls truly overlap each wave.
+        expect(inner.maxInFlight).toBe(3);
+    });
+
+    it('runs strictly SEQUENTIAL with parallelBatches: 1 (max-in-flight never exceeds 1)', async () => {
+        const inner = concurrencyProvider();
+        await runPrePass(budgeted(inner), pTargets(6), cfg({ parallelBatches: 1 }), { cost });
+        expect(inner.maxInFlight).toBe(1);
+    });
+
+    it('yields the SAME survivor set for parallelBatches 1 and 4 (order-insensitive)', async () => {
+        const responder = (request: ProviderRequest) => ({
+            candidates: [
+                candidate(`e_${request.prompt.length} - 1`, 'dec', 'e + 1'),
+                candidate(`e_${request.prompt.length} * 2`, 'mul', 'e + 1'),
+            ],
+        });
+        const targets = pTargets(7).map(t => ({
+            ...t,
+            spanText: t.spanText.replace(/\bp\b/g, 'e'),
+            context: t.context?.replace(/\bp\b/g, 'e'),
+            fileContent: t.fileContent?.replace(/\bp\b/g, 'e'),
+        }));
+
+        const seq = await runPrePass(
+            budgeted(new MockProvider({ responder, costUsd: 0 })),
+            targets,
+            cfg({ parallelBatches: 1 }),
+            { cost },
+        );
+        // Fresh cost + cache-independent comparison: a second run over the same
+        // (now warm) cache returns the identical survivors regardless of waves.
+        const par = await runPrePass(
+            budgeted(new MockProvider({ responder, costUsd: 0 })),
+            targets,
+            cfg({ parallelBatches: 4 }),
+            { cost: new CostAccumulator() },
+        );
+
+        const keys = (r: typeof seq) => r.survivors.map(dedupKey).sort();
+        expect(keys(par)).toEqual(keys(seq));
+        expect(seq.survivors.length).toBeGreaterThan(0);
+    });
+
+    it('emits one heartbeat per processed call under parallel waves', async () => {
+        const inner = new MockProvider({
+            responder: (request: ProviderRequest) => ({
+                candidates: [candidate(`g_${request.prompt.length} - 1`, 'dec', 'g + 1')],
+            }),
+            costUsd: 0,
+        });
+        const lines: string[] = [];
+        const targets = pTargets(5).map(t => ({
+            ...t,
+            spanText: t.spanText.replace(/\bp\b/g, 'g'),
+            context: t.context?.replace(/\bp\b/g, 'g'),
+            fileContent: t.fileContent?.replace(/\bp\b/g, 'g'),
+        }));
+        const result = await runPrePass(budgeted(inner), targets, cfg({ parallelBatches: 2 }), {
+            cost,
+            log: l => lines.push(l),
+        });
+        const heartbeats = lines.filter(l => l.includes('pre-pass ['));
+        expect(heartbeats).toHaveLength(result.callsIssued);
+        expect(heartbeats).toHaveLength(5);
+        expect(heartbeats[0]).toContain('[1/5]');
+        expect(heartbeats[4]).toContain('[5/5]');
     });
 });
