@@ -24,6 +24,11 @@ describe('llmMutatorConfigSchema — empty block defaults', () => {
         expect(cfg.model).toBe(DEFAULT_MODEL);
         expect(cfg.cacheDir).toBe('.stryker-llm-cache');
 
+        // OpenAI-compatible provider knobs: real OpenAI root, json-mode on, no pricing.
+        expect(cfg.openAiBaseUrl).toBe('https://api.openai.com/v1');
+        expect(cfg.openAiJsonMode).toBe(true);
+        expect(cfg.openAiPricing).toBeUndefined();
+
         // Heuristics: ON by default, empty allow-list (= all), skipUncovered on.
         expect(cfg.heuristics.enabled).toBe(true);
         expect(cfg.heuristics.operators).toEqual([]);
@@ -95,6 +100,43 @@ describe('llmMutatorConfigSchema — dynamicLLM block', () => {
     it('honors an explicit dynamicLLM.frozen = true (CI cache-only gate)', () => {
         const cfg = llmMutatorConfigSchema.parse({ dynamicLLM: { enabled: true, frozen: true } });
         expect(cfg.dynamicLLM.frozen).toBe(true);
+    });
+});
+
+describe('llmMutatorConfigSchema — OpenAI-compatible provider knobs', () => {
+    it('accepts a custom (versionless) openAiBaseUrl for a local server', () => {
+        const cfg = llmMutatorConfigSchema.parse({ openAiBaseUrl: 'http://10.0.230.76:1234' });
+        expect(cfg.openAiBaseUrl).toBe('http://10.0.230.76:1234');
+    });
+
+    it('rejects an openAiBaseUrl that is not a URL', () => {
+        expect(() => llmMutatorConfigSchema.parse({ openAiBaseUrl: 'not a url' })).toThrow();
+    });
+
+    it('honors an explicit openAiJsonMode = false (prompt-mode fallback)', () => {
+        const cfg = llmMutatorConfigSchema.parse({ openAiJsonMode: false });
+        expect(cfg.openAiJsonMode).toBe(false);
+    });
+
+    it('accepts metered openAiPricing in dollars per million tokens', () => {
+        const cfg = llmMutatorConfigSchema.parse({
+            openAiPricing: { inputPerMTok: 0.15, outputPerMTok: 0.6 },
+        });
+        expect(cfg.openAiPricing).toEqual({ inputPerMTok: 0.15, outputPerMTok: 0.6 });
+    });
+
+    it('rejects negative openAiPricing rates (.nonnegative())', () => {
+        expect(() =>
+            llmMutatorConfigSchema.parse({
+                openAiPricing: { inputPerMTok: -1, outputPerMTok: 0.6 },
+            }),
+        ).toThrow();
+    });
+
+    it('rejects an openAiPricing object missing a required rate', () => {
+        expect(() =>
+            llmMutatorConfigSchema.parse({ openAiPricing: { inputPerMTok: 0.15 } }),
+        ).toThrow();
     });
 });
 

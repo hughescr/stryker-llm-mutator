@@ -125,6 +125,44 @@ export const llmMutatorConfigSchema = z
          */
         cacheDir: z.string().min(1).default('.stryker-llm-cache'),
         /**
+         * Base URL for the OpenAI-compatible Chat Completions backend (the
+         * `openai` and `openai-compatible` providers). The provider resolves the
+         * concrete endpoint by appending `/chat/completions` (adding the `/v1`
+         * version segment when the base has none), so both a bare host
+         * (`http://10.0.230.76:1234`) and a versioned base
+         * (`https://api.openai.com/v1`) are accepted. Defaults to the real OpenAI
+         * API root. IGNORED by the non-OpenAI providers (anthropic-*, mock). Uses
+         * the zod-v4 top-level `z.url()` validator (the v4 replacement for the
+         * deprecated `z.string().url()`).
+         */
+        openAiBaseUrl: z.url().default('https://api.openai.com/v1'),
+        /**
+         * Structured-output mode for the OpenAI-compatible provider. `true`
+         * (default) sends the native `response_format: { type: 'json_schema', … }`
+         * envelope; `false` falls back to the portable prompt-mode directive that
+         * embeds the schema in the user message. In BOTH modes the provider still
+         * parses + validates the response locally (with one re-request retry)
+         * before resolving, since `strict` is an OpenAI-only guarantee. IGNORED by
+         * the non-OpenAI providers.
+         */
+        openAiJsonMode: z.boolean().default(true),
+        /**
+         * Optional metered pricing for the OpenAI-compatible provider, in dollars
+         * per MILLION tokens. There is NO built-in price table: when this is
+         * supplied the provider reports `costUsd` from the response's token usage;
+         * when ABSENT (the default — typical for a key-less LOCAL LM Studio / vLLM
+         * server) every call reports `costUsd: 0`. IGNORED by the non-OpenAI
+         * providers.
+         */
+        openAiPricing: z
+            .object({
+                /** Dollars per million PROMPT (input) tokens. */
+                inputPerMTok: z.number().nonnegative(),
+                /** Dollars per million COMPLETION (output) tokens. */
+                outputPerMTok: z.number().nonnegative(),
+            })
+            .optional(),
+        /**
          * The HEURISTICS switch block (functional-architecture §6). The
          * deterministic, network-free heuristic mutators (default ON). With an
          * empty `operators` allow-list every registered heuristic runs; otherwise

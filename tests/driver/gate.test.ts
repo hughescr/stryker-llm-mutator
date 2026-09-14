@@ -109,9 +109,24 @@ describe('assertLlmCredentials', () => {
         expect(() => assertLlmCredentials(cfg, { OPENAI_API_KEY: 'sk-1' })).not.toThrow();
     });
 
-    it('throws for openai-compatible without OPENAI_API_KEY', () => {
+    it('carries the offending provider on the openai MissingCredentialsError', () => {
+        const cfg = config({ provider: 'openai', dynamicLLM: { enabled: true } });
+        try {
+            assertLlmCredentials(cfg, {});
+        } catch (error) {
+            expect(error).toBeInstanceOf(MissingCredentialsError);
+            expect((error as MissingCredentialsError).provider).toBe('openai');
+        }
+    });
+
+    it('does NOT throw for openai-compatible without OPENAI_API_KEY (key-less local servers)', () => {
         const cfg = config({ provider: 'openai-compatible', dynamicLLM: { enabled: true } });
-        expect(() => assertLlmCredentials(cfg, {})).toThrow(MissingCredentialsError);
+        expect(() => assertLlmCredentials(cfg, {})).not.toThrow();
+    });
+
+    it('also passes for openai-compatible WHEN a key happens to be present', () => {
+        const cfg = config({ provider: 'openai-compatible', dynamicLLM: { enabled: true } });
+        expect(() => assertLlmCredentials(cfg, { OPENAI_API_KEY: 'sk-local' })).not.toThrow();
     });
 });
 

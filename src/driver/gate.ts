@@ -119,9 +119,12 @@ export function gateSwitches(cfg: LlmMutatorConfig): GatePlan {
 }
 
 /**
- * The set of provider names that require network credentials. The offline `mock`
- * provider is intentionally absent — it needs nothing, so dynamicLLM with `mock`
- * skips the credential check entirely.
+ * The set of provider names that make NETWORK calls and therefore run the
+ * credential check below. The offline `mock` provider is intentionally absent —
+ * it needs nothing, so dynamicLLM with `mock` skips the check entirely. NOTE that
+ * membership here means "runs the check", NOT "mandates a key":
+ * `openai-compatible` is networked but key-OPTIONAL (local servers are key-less),
+ * so it passes the check whether or not a key is present (see below).
  */
 const NETWORK_PROVIDERS = new Set<LlmMutatorConfig['provider']>([
     'anthropic-agent-sdk',
@@ -142,7 +145,11 @@ const NETWORK_PROVIDERS = new Set<LlmMutatorConfig['provider']>([
  *     `AgentProviderError('missing_oauth_token')` into a uniform
  *     {@link MissingCredentialsError}.
  *   • `anthropic-api` → require `ANTHROPIC_API_KEY`.
- *   • `openai` / `openai-compatible` → require `OPENAI_API_KEY`.
+ *   • `openai` → require `OPENAI_API_KEY` (the real, metered OpenAI API).
+ *   • `openai-compatible` → NO required key: local servers (LM Studio / vLLM /
+ *     llama.cpp) run key-less. The provider still SENDS
+ *     `Authorization: Bearer <OPENAI_API_KEY>` when a key happens to be present,
+ *     but its absence is NOT a credential error here.
  *   • `mock` (or dynamicLLM disabled) → no-op.
  *
  * @param cfg The parsed config.
@@ -185,14 +192,20 @@ export function assertLlmCredentials(
         return;
     }
 
-    // openai / openai-compatible
-    if (!env.OPENAI_API_KEY) {
-        throw new MissingCredentialsError(
-            `dynamicLLM provider "${provider}" requires OPENAI_API_KEY, but none was found in ` +
-                'the environment.',
-            provider,
-        );
+    if (provider === 'openai') {
+        if (!env.OPENAI_API_KEY) {
+            throw new MissingCredentialsError(
+                'dynamicLLM provider "openai" requires OPENAI_API_KEY, but none was found in ' +
+                    'the environment.',
+                provider,
+            );
+        }
+        return;
     }
+
+    // openai-compatible — a local OpenAI-compatible server (LM Studio / vLLM /
+    // llama.cpp) is key-less, so a missing OPENAI_API_KEY is NOT an error. The
+    // provider forwards the key as `Authorization: Bearer` only if one is present.
 }
 
 /** Injected dependencies for {@link buildLlmMutator} — all bun-mockable. */
