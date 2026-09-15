@@ -122,6 +122,12 @@ describe('arrayMethodSwapMutator', () => {
         expect(mutate('xs.reduce(f);')).toHaveLength(0);
     });
 
+    it('skips inherited object names rather than treating them as swap entries', () => {
+        for (const name of ['toString', 'constructor', '__proto__', 'valueOf']) {
+            expect(mutate(`xs.${name}(f);`)).toHaveLength(0);
+        }
+    });
+
     it('skips a bare-identifier call (`map(f)` — no member callee)', () => {
         expect(mutate('map(f);')).toHaveLength(0);
     });

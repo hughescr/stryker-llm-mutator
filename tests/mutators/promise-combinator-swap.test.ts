@@ -110,6 +110,12 @@ describe('promiseCombinatorSwapMutator', () => {
         expect(mutate('Promise.resolve(x);')).toHaveLength(0);
     });
 
+    it('skips inherited object names rather than treating them as swap entries', () => {
+        for (const name of ['toString', 'constructor', '__proto__', 'valueOf']) {
+            expect(mutate(`Promise.${name}(xs);`)).toHaveLength(0);
+        }
+    });
+
     it('skips computed access (`Promise["all"](xs)`)', () => {
         expect(mutate('Promise["all"](xs);')).toHaveLength(0);
     });

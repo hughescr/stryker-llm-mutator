@@ -11,12 +11,8 @@
 import { describe, expect, it } from 'bun:test';
 import babel from '@babel/core';
 import {
-    type AssignmentPattern,
     type BooleanLiteral,
-    type Identifier,
-    isAssignmentPattern,
     isBooleanLiteral,
-    isIdentifier,
     isNumericLiteral,
     isStringLiteral,
     type Node,
@@ -50,24 +46,25 @@ function firstPath(code: string, predicate: (path: NodePath) => boolean): NodePa
     return found;
 }
 
-/** Collect the yielded replacement nodes for the first AssignmentPattern in `code`. */
+/** Collect the literal replacements for the first default-value literal in `code`. */
 function mutate(code: string): Node[] {
-    const path = firstPath(code, p => p.isAssignmentPattern());
+    const path = firstPath(
+        code,
+        p => p.isNumericLiteral() || p.isBooleanLiteral() || p.isStringLiteral(),
+    );
     return [...defaultParamValueTweakMutator.mutate(path)];
 }
 
-/** Describe the default value (`right`) of a yielded AssignmentPattern. */
+/** Describe a yielded replacement literal. */
 function rightValue(node: Node): number | boolean | string {
-    expect(isAssignmentPattern(node)).toBe(true);
-    const { right } = node as AssignmentPattern;
-    if (isNumericLiteral(right)) {
-        return (right as NumericLiteral).value;
+    if (isNumericLiteral(node)) {
+        return (node as NumericLiteral).value;
     }
-    if (isBooleanLiteral(right)) {
-        return (right as BooleanLiteral).value;
+    if (isBooleanLiteral(node)) {
+        return (node as BooleanLiteral).value;
     }
-    if (isStringLiteral(right)) {
-        return JSON.stringify((right as StringLiteral).value);
+    if (isStringLiteral(node)) {
+        return JSON.stringify((node as StringLiteral).value);
     }
     return 'other';
 }
@@ -87,12 +84,9 @@ describe('defaultParamValueTweakMutator', () => {
         expect(out.map(rightValue)).toEqual([1, -1]);
     });
 
-    it('preserves the binding `left` unchanged on each variant', () => {
-        const out = mutate('function f(a = 5) {}');
-        for (const node of out) {
-            const left = (node as AssignmentPattern).left;
-            expect(isIdentifier(left) && (left as Identifier).name === 'a').toBe(true);
-        }
+    it('targets only the AssignmentPattern right literal, not the enclosing binding', () => {
+        const assignment = firstPath('function f(a = 5) {}', p => p.isAssignmentPattern());
+        expect([...defaultParamValueTweakMutator.mutate(assignment)]).toHaveLength(0);
     });
 
     it('flips a boolean default (`function f(a = true)` → `a = false`)', () => {
@@ -116,39 +110,32 @@ describe('defaultParamValueTweakMutator', () => {
     });
 
     it('skips a non-literal default (`a = compute()`)', () => {
-        expect(mutate('function f(a = compute()) {}')).toHaveLength(0);
+        const path = firstPath('function f(a = compute()) {}', p => p.isAssignmentPattern());
+        expect([...defaultParamValueTweakMutator.mutate(path)]).toHaveLength(0);
     });
 
     it('skips an identifier default (`a = DEFAULT`)', () => {
-        expect(mutate('function f(a = DEFAULT) {}')).toHaveLength(0);
+        const path = firstPath('function f(a = DEFAULT) {}', p => p.isAssignmentPattern());
+        expect([...defaultParamValueTweakMutator.mutate(path)]).toHaveLength(0);
     });
 
     it('does NOT tweak a BigInt default (`a = 5n` — BigIntLiteral, not NumericLiteral)', () => {
-        expect(mutate('function f(a = 5n) {}')).toHaveLength(0);
+        const path = firstPath('function f(a = 5n) {}', p => p.isBigIntLiteral());
+        expect([...defaultParamValueTweakMutator.mutate(path)]).toHaveLength(0);
     });
 
     it('matches a destructuring default (`{ a = 5 } = {}`)', () => {
         // Two AssignmentPatterns exist: the outer `{ a = 5 } = {}` (right is `{}`,
         // not tweakable) and the inner `a = 5` (numeric). Target the inner one
         // directly — its `right` is the NumericLiteral 5.
-        const path = firstPath(
-            'function f({ a = 5 } = {}) {}',
-            p => p.isAssignmentPattern() && isNumericLiteral((p.node as AssignmentPattern).right),
-        );
+        const path = firstPath('function f({ a = 5 } = {}) {}', p => p.isNumericLiteral());
         const out = [...defaultParamValueTweakMutator.mutate(path)];
         expect(out.map(rightValue)).toEqual([6, 4, 0]);
     });
 
     it('does not tweak the OUTER destructuring pattern whose default is `{}`', () => {
         // `{ a = 5 } = {}` outer: right is an ObjectExpression, not a literal → skip.
-        const path = firstPath(
-            'function f({ a = 5 } = {}) {}',
-            p =>
-                p.isAssignmentPattern() &&
-                !isNumericLiteral((p.node as AssignmentPattern).right) &&
-                !isBooleanLiteral((p.node as AssignmentPattern).right) &&
-                !isStringLiteral((p.node as AssignmentPattern).right),
-        );
+        const path = firstPath('function f({ a = 5 } = {}) {}', p => p.isAssignmentPattern());
         expect([...defaultParamValueTweakMutator.mutate(path)]).toHaveLength(0);
     });
 

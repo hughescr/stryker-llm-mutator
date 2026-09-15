@@ -11,12 +11,14 @@
  */
 
 import { describe, expect, it } from 'bun:test';
+import babel from '@babel/core';
 import { isConditionalExpression, type Node } from '@babel/types';
 
 import {
     buildLlmMutatorMap,
     type LlmMutatorMap,
     locKeyFromRange,
+    locKeyFromBabelLoc,
     type ParsedEntry,
 } from '../../src/pipeline/llm-map';
 import { createLlmMutator, LLM_MUTATOR_NAME } from '../../src/mutators/llm-mutator';
@@ -58,6 +60,29 @@ function entryFor(replacement: string, mutatorName: string): ParsedEntry {
         throw new Error(`fixture replacement did not parse: ${replacement}`);
     }
     return { node, mutatorName, replacement, original: 'orig' };
+}
+
+const { parse, traverse } = babel as {
+    parse: (code: string, opts?: object) => unknown;
+    traverse: (ast: unknown, visitor: { enter(path: NodePath): void }) => void;
+};
+
+function pathFor(code: string, predicate: (path: NodePath) => boolean, filename: string): NodePath {
+    const ast = parse(code, { configFile: false, babelrc: false });
+    let found: NodePath | undefined;
+    traverse(ast, {
+        enter(path: NodePath) {
+            if (!found && predicate(path)) {
+                Object.assign(path as object, { hub: { file: { opts: { filename } } } });
+                found = path;
+                path.stop();
+            }
+        },
+    });
+    if (!found) {
+        throw new Error(`No matching path in ${code}`);
+    }
+    return found;
 }
 
 describe('createLlmMutator', () => {
@@ -151,5 +176,87 @@ describe('createLlmMutator', () => {
         expect([...mutator.mutate(fakePath(abs, babelRange(2, 0, 5)))]).toHaveLength(1);
         // Babel line 1 MISSES (proves the +1 conversion is applied, not the raw value).
         expect([...mutator.mutate(fakePath(abs, babelRange(1, 0, 5)))]).toHaveLength(0);
+    });
+
+    it('lifts a shorthand object candidate at the property-key location', () => {
+        const file = '/abs/shorthand.ts';
+        const path = pathFor('const output = { signal };', p => p.isObjectExpression(), file);
+        const property = (path.node as { properties: Node[] }).properties[0]! as { key: Node };
+        const key = locKeyFromBabelLoc(property.key.loc!);
+        const map = singleEntryMap(file, key, entryFor('null', 'llm/shorthand'));
+        const out = [...createLlmMutator(map).mutate(path)];
+        expect(out).toHaveLength(1);
+        expect((out[0] as { properties: Node[] }).properties[0]!.type).toBe('ObjectProperty');
+        expect(
+            (out[0] as { properties: Array<{ shorthand?: boolean }> }).properties[0]!.shorthand,
+        ).toBe(false);
+    });
+
+    it('drops a const-binding assignment candidate and reports the reason', () => {
+        const file = '/abs/const.ts';
+        const path = pathFor(
+            'const locked = 1; locked;',
+            p =>
+                p.isIdentifier() &&
+                (p.node as { name?: string }).name === 'locked' &&
+                p.parentPath?.node.type === 'ExpressionStatement',
+            file,
+        );
+        const key = locKeyFromBabelLoc(path.node.loc!);
+        const notes: string[] = [];
+        const map = singleEntryMap(file, key, entryFor('locked = 2', 'llm/const'));
+        expect([...createLlmMutator(map, line => notes.push(line)).mutate(path)]).toHaveLength(0);
+        expect(notes).toHaveLength(1);
+        expect(notes[0]).toContain('immutable binding locked');
+    });
+
+    it('keeps writable lets and property writes, but drops imported bindings', () => {
+        const file = '/abs/writes.ts';
+        const cases = [
+            { code: 'let value = 1; value;', name: 'value', replacement: 'value = 2', expected: 1 },
+            {
+                code: 'const holder = {}; holder.timer;',
+                name: 'timer',
+                replacement: 'holder.timer = 2',
+                expected: 1,
+            },
+            {
+                code: 'import { value } from "pkg"; value;',
+                name: 'value',
+                replacement: 'value = 2',
+                expected: 0,
+            },
+        ];
+        for (const fixture of cases) {
+            const path = pathFor(
+                fixture.code,
+                p =>
+                    fixture.name === 'timer'
+                        ? p.node.type === 'MemberExpression'
+                        : p.isIdentifier() &&
+                          (p.node as { name?: string }).name === fixture.name &&
+                          p.parentPath?.node.type === 'ExpressionStatement',
+                file,
+            );
+            const map = singleEntryMap(
+                file,
+                locKeyFromBabelLoc(path.node.loc!),
+                entryFor(fixture.replacement, 'llm/write'),
+            );
+            expect([...createLlmMutator(map).mutate(path)]).toHaveLength(fixture.expected);
+        }
+    });
+
+    it('drops a candidate invalid in its assignment parent field', () => {
+        const file = '/abs/placement.ts';
+        const path = pathFor('entry.timer = 1;', p => p.node.type === 'MemberExpression', file);
+        const notes: string[] = [];
+        const map = singleEntryMap(
+            file,
+            locKeyFromBabelLoc(path.node.loc!),
+            entryFor('({ replacement: 1 })', 'llm/invalid-place'),
+        );
+        expect([...createLlmMutator(map, line => notes.push(line)).mutate(path)]).toHaveLength(0);
+        expect(notes).toHaveLength(1);
     });
 });

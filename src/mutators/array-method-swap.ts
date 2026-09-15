@@ -87,10 +87,10 @@ export const arrayMethodSwapMutator: NodeMutator = {
             return;
         }
 
-        const targets = SWAP_TABLE[callee.property.name];
-        if (!targets) {
+        if (!Object.hasOwn(SWAP_TABLE, callee.property.name)) {
             return;
         }
+        const targets = SWAP_TABLE[callee.property.name]!;
 
         for (const swapName of targets) {
             yield callExpression(

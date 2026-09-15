@@ -102,6 +102,12 @@ describe('stringMethodArgSwapMutator', () => {
         expect(mutate('s.indexOf(x);')).toHaveLength(0);
     });
 
+    it('skips inherited object names rather than treating them as swap entries', () => {
+        for (const name of ['toString', 'constructor', '__proto__', 'valueOf']) {
+            expect(mutate(`s.${name}(x);`)).toHaveLength(0);
+        }
+    });
+
     it('skips a bare-identifier call (`includes(x)`)', () => {
         expect(mutate('includes(x);')).toHaveLength(0);
     });

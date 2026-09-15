@@ -33,7 +33,14 @@
  * later required.
  */
 
-import type { Node } from '@babel/types';
+import {
+    isObjectProperty,
+    objectExpression,
+    objectProperty,
+    validate,
+    type Expression,
+    type Node,
+} from '@babel/types';
 
 import {
     type BabelLoc,
@@ -77,7 +84,7 @@ function readLoc(node: Node): BabelLoc | undefined {
  * @param map The precomputed `(absFileName, locKey) → ParsedEntry[]` table.
  * @returns A Stryker `NodeMutator` named {@link LLM_MUTATOR_NAME}.
  */
-export function createLlmMutator(map: LlmMutatorMap): NodeMutator {
+export function createLlmMutator(map: LlmMutatorMap, log?: (line: string) => void): NodeMutator {
     return {
         name: LLM_MUTATOR_NAME,
 
@@ -94,7 +101,74 @@ export function createLlmMutator(map: LlmMutatorMap): NodeMutator {
             if (loc === undefined) {
                 return;
             }
-            const entries: ParsedEntry[] | undefined = byLoc.get(locKeyFromBabelLoc(loc));
+            const locKey = locKeyFromBabelLoc(loc);
+            const entries: ParsedEntry[] | undefined = byLoc.get(locKey);
+            const drop = (entry: ParsedEntry, candidateLoc: string, reason: string): void => {
+                log?.(
+                    `stryker-llm: dropped unplaceable candidate ${JSON.stringify({
+                        fileName,
+                        loc: candidateLoc,
+                        original: entry.original,
+                        replacement: entry.replacement,
+                        reason,
+                    })}`,
+                );
+            };
+
+            if (path.isObjectExpression?.()) {
+                for (const [index, property] of path.node.properties.entries()) {
+                    if (!isObjectProperty(property) || !property.shorthand) {
+                        continue;
+                    }
+                    const keyLoc = readLoc(property.key);
+                    if (keyLoc === undefined) {
+                        continue;
+                    }
+                    const key = locKeyFromBabelLoc(keyLoc);
+                    for (const entry of byLoc.get(key) ?? []) {
+                        const replacement = reparse(entry);
+                        try {
+                            const expanded = objectProperty(
+                                property.key,
+                                replacement as Expression,
+                                false,
+                                false,
+                            );
+                            yield objectExpression(
+                                path.node.properties.map((current, currentIndex) =>
+                                    currentIndex === index ? expanded : current,
+                                ),
+                            );
+                        } catch (error) {
+                            if (error instanceof TypeError) {
+                                drop(entry, key, error.message);
+                            } else {
+                                throw error;
+                            }
+                        }
+                    }
+                }
+            }
+
+            const runtimePath = path as NodePath & {
+                parentPath?: NodePath;
+            };
+            if (
+                isObjectProperty(path.node) &&
+                path.node.shorthand &&
+                runtimePath.parentPath?.isObjectExpression()
+            ) {
+                return;
+            }
+            if (
+                runtimePath.parentPath !== undefined &&
+                runtimePath.parentPath !== null &&
+                isObjectProperty(runtimePath.parentPath.node) &&
+                runtimePath.parentPath.node.shorthand &&
+                runtimePath.parentPath.parentPath?.isObjectExpression()
+            ) {
+                return;
+            }
             if (entries === undefined) {
                 return;
             }
@@ -105,10 +179,57 @@ export function createLlmMutator(map: LlmMutatorMap): NodeMutator {
                 // string parses, so the re-parse succeeds in practice; the
                 // `entry.node` fallback guards the impossible-in-practice failure
                 // so a built candidate is never silently dropped at mutate time.
-                yield reparse(entry);
+                const replacement = reparse(entry);
+                const reason = placementError(path, replacement);
+                if (reason === undefined) {
+                    yield replacement;
+                } else {
+                    drop(entry, locKey, reason);
+                }
             }
         },
     };
+}
+
+function placementError(path: NodePath, replacement: Node): string | undefined {
+    const runtimePath = path as NodePath & {
+        key: string | number;
+        listKey?: string;
+        parentPath?: {
+            node: Record<string, unknown>;
+            scope?: { getBinding(name: string): { kind: string } | undefined };
+        };
+        scope?: { getBinding(name: string): { kind: string } | undefined };
+    };
+    if (replacement.type === 'AssignmentExpression' && replacement.left.type === 'Identifier') {
+        const binding = runtimePath.scope?.getBinding(replacement.left.name);
+        if (binding?.kind === 'const' || binding?.kind === 'module') {
+            return `Assignment to immutable binding ${replacement.left.name}`;
+        }
+    }
+    const parent = runtimePath.parentPath;
+    if (parent === undefined || parent === null) {
+        return undefined;
+    }
+    try {
+        if (runtimePath.listKey !== undefined) {
+            const original = parent.node[runtimePath.listKey];
+            if (!Array.isArray(original)) {
+                return `Expected parent list ${runtimePath.listKey}`;
+            }
+            const list = [...original];
+            list[runtimePath.key as number] = replacement;
+            validate(parent.node, runtimePath.listKey, list);
+        } else {
+            validate(parent.node, String(runtimePath.key), replacement);
+        }
+    } catch (error) {
+        if (error instanceof TypeError) {
+            return error.message;
+        }
+        throw error;
+    }
+    return undefined;
 }
 
 /**

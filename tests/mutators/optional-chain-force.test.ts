@@ -12,11 +12,14 @@
 import { describe, expect, it } from 'bun:test';
 import babel from '@babel/core';
 import {
+    expressionStatement,
+    file,
     type Identifier,
     isIdentifier,
     isOptionalMemberExpression,
     type Node,
     type OptionalMemberExpression,
+    program,
 } from '@babel/types';
 
 import { optionalChainForceMutator } from '../../src/mutators/optional-chain-force';
@@ -105,6 +108,80 @@ describe('optionalChainForceMutator', () => {
         expect(isIdentifier(member.property) && (member.property as Identifier).name === 'b').toBe(
             true,
         );
+    });
+
+    it('lifts an inner assignment receiver while skipping the terminal write target', () => {
+        const path = firstPath(
+            'holder.value.deep = next;',
+            p => p.node.type === 'AssignmentExpression',
+        );
+        const out = [...optionalChainForceMutator.mutate(path)];
+        expect(out).toHaveLength(1);
+        expect(out[0]!.type).toBe('AssignmentExpression');
+        expect((out[0] as { left: { object: Node } }).left.object.type).toBe(
+            'OptionalMemberExpression',
+        );
+        const printed = (
+            babel as unknown as {
+                transformFromAstSync(ast: Node, code: string, options: object): { code: string };
+            }
+        ).transformFromAstSync(file(program([expressionStatement(out[0] as never)])), '', {
+            configFile: false,
+            babelrc: false,
+        }).code;
+        expect(printed).toContain('holder?.value');
+        expect(() => parse(printed, { configFile: false, babelrc: false })).not.toThrow();
+    });
+
+    it('skips a terminal assignment target', () => {
+        const path = firstPath('holder.value = next;', p => p.node.type === 'MemberExpression');
+        expect([...optionalChainForceMutator.mutate(path)]).toHaveLength(0);
+    });
+
+    it('skips terminal update and loop targets while retaining nested loop receivers', () => {
+        for (const code of [
+            'holder.value++;',
+            'for (holder.value of items) {}',
+            'for (holder.value in items) {}',
+        ]) {
+            const path = firstPath(code, p => p.node.type === 'MemberExpression');
+            expect([...optionalChainForceMutator.mutate(path)]).toHaveLength(0);
+        }
+        for (const code of [
+            'for (holder.a.value of items) {}',
+            'for (holder.a.value in items) {}',
+        ]) {
+            const path = firstPath(
+                code,
+                p => p.node.type === 'ForOfStatement' || p.node.type === 'ForInStatement',
+            );
+            const out = [...optionalChainForceMutator.mutate(path)];
+            expect(out).toHaveLength(1);
+            expect(out[0]!.type).toBe(path.node.type);
+        }
+    });
+
+    it('retains reads in computed keys and deeper tagged-template receivers', () => {
+        const computed = firstPath(
+            '({ [holder.value]: x } = source);',
+            p => p.node.type === 'MemberExpression',
+        );
+        expect([...optionalChainForceMutator.mutate(computed)]).toHaveLength(1);
+        const tag = firstPath(
+            'holder.a.tag`x`;',
+            p =>
+                p.node.type === 'MemberExpression' &&
+                (p.node as { property?: { name?: string } }).property?.name === 'a',
+        );
+        expect([...optionalChainForceMutator.mutate(tag)]).toHaveLength(1);
+    });
+
+    it('skips a tagged-template tag, where optional member syntax is invalid', () => {
+        const path = firstPath(
+            'tag.member`text`;',
+            p => p.node.type === 'TaggedTemplateExpression',
+        );
+        expect([...optionalChainForceMutator.mutate(path)]).toHaveLength(0);
     });
 
     it('does NOT match an already-optional member (`a?.b` is an OptionalMemberExpression)', () => {

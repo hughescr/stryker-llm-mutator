@@ -15,23 +15,18 @@
  * strings. `node.left` (the binding) is reused unchanged; only `right` (the
  * default value) changes.
  *
- * MATCH: `path.isAssignmentPattern()` — a default-valued parameter (`a = 5`) or a
- * destructuring default (`{ a = 5 } = {}`) is an `AssignmentPattern` with
- * `left` = the binding and `right` = the default. Then `right` must be a TWEAKABLE
- * LITERAL:
+ * MATCH: the visited node is the `right` literal of an `AssignmentPattern`, so
+ * Stryker replaces only the default value and preserves its binding shape.
  *   • `NumericLiteral` → `+1`, `-1`, and `0` (skip `0` when already 0).
  *   • `BooleanLiteral` → flip.
  *   • `StringLiteral`  → `''` (skip when already empty).
  *
- * REPLACEMENTS (each a fresh `AssignmentPattern` with the same `left`):
+ * REPLACEMENTS (each a fresh literal in the same default-value slot):
  *   • numeric `a = 5` → `a = 6`, `a = 4`, `a = 0`.
  *   • boolean `a = true` → `a = false`.
  *   • string  `a = 'x'` → `a = ''`.
  *
- * LEGALITY: Stryker replaces the WHOLE visited `AssignmentPattern` with another
- * `AssignmentPattern` (same node category) in the same param / destructuring
- * position, with the same `left` and a new literal `right` — legal in exactly that
- * position. Verified live: `function f(a = 5)` placed as `a = 6`.
+ * LEGALITY: replacement is literal-for-literal in the existing default slot.
  *
  * EDGE CASES:
  *   • `right` not a tweakable literal (Identifier, CallExpression, object/array
@@ -47,7 +42,6 @@
  */
 
 import {
-    assignmentPattern,
     booleanLiteral,
     isBooleanLiteral,
     isNumericLiteral,
@@ -59,38 +53,36 @@ import {
 import type { NodeMutator } from './types';
 
 /**
- * The `DefaultParamValueTweak` heuristic mutator. For an `AssignmentPattern` whose
- * default value is a numeric / boolean / string literal, yields the pattern with
- * the default tweaked (±1 / 0 for numbers, flip for booleans, empty for strings).
- * Yields nothing for non-literal defaults or any non-AssignmentPattern node, so it
- * is safe to register globally.
+ * The `DefaultParamValueTweak` heuristic mutator mutates numeric, boolean, and
+ * string literals only when they occupy an `AssignmentPattern.right` slot.
  */
 export const defaultParamValueTweakMutator: NodeMutator = {
     name: 'DefaultParamValueTweak',
 
     *mutate(path) {
-        if (!path.isAssignmentPattern()) {
+        const parent = path.parentPath;
+        if (!parent?.isAssignmentPattern() || parent.node.right !== path.node) {
             return;
         }
 
-        const { left, right } = path.node;
+        const right = path.node;
 
         if (isNumericLiteral(right)) {
-            yield assignmentPattern(left, numericLiteral(right.value + 1));
-            yield assignmentPattern(left, numericLiteral(right.value - 1));
+            yield numericLiteral(right.value + 1);
+            yield numericLiteral(right.value - 1);
             if (right.value !== 0) {
-                yield assignmentPattern(left, numericLiteral(0));
+                yield numericLiteral(0);
             }
             return;
         }
 
         if (isBooleanLiteral(right)) {
-            yield assignmentPattern(left, booleanLiteral(!right.value));
+            yield booleanLiteral(!right.value);
             return;
         }
 
         if (isStringLiteral(right) && right.value !== '') {
-            yield assignmentPattern(left, stringLiteral(''));
+            yield stringLiteral('');
         }
     },
 };

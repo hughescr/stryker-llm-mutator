@@ -305,7 +305,7 @@ export async function buildLlmMutator(
     }
 
     return {
-        mutator: createLlmMutator(map),
+        mutator: createLlmMutator(map, log),
         map,
         costSnapshot: prePass.cost,
         droppedLog: dropped,
