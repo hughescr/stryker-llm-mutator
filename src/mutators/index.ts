@@ -11,7 +11,6 @@
 
 import type { NodeMutator } from './types';
 // P1 (M1)
-import { fallbackOperandSubstitutionMutator } from './fallback-operand-substitution';
 import { numberLiteralValueMutator } from './number-literal-value';
 // P2 (M5)
 import { awaitDropMutator } from './await-drop';
@@ -25,7 +24,6 @@ import { stringMethodArgSwapMutator } from './string-method-arg-swap';
 
 export type { NodeMutator, NodePath } from './types';
 // P1 (M1)
-export { fallbackOperandSubstitutionMutator } from './fallback-operand-substitution';
 export { numberLiteralValueMutator } from './number-literal-value';
 // P2 (M5)
 export { awaitDropMutator } from './await-drop';
@@ -48,12 +46,11 @@ export { createLlmMutator, LLM_MUTATOR_NAME } from './llm-mutator';
  * set `src/injection.ts` registers into Stryker's `allMutators`, and the order the
  * driver's `selectHeuristicMutators` preserves. M1 shipped the P1 trio; M5
  * appended P2–P4. Every operator is verified to place cleanly through the REAL
- * `@stryker-mutator/instrumenter` by the unit-test idiom + the M0 injection canary.
+ * `@stryker-mutator/instrumenter` by the injection and placement integration tests.
  */
 export const heuristicMutators: readonly NodeMutator[] = [
     // P1
     numberLiteralValueMutator,
-    fallbackOperandSubstitutionMutator,
     // P2
     callArgumentTweakMutator,
     awaitDropMutator,

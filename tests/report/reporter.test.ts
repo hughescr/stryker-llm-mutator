@@ -35,7 +35,7 @@ describe('isOurMutant', () => {
         expect(isOurMutant('llm/off-by-one')).toBe(true);
         expect(isOurMutant('heuristic/NumberLiteralValue')).toBe(true);
         expect(isOurMutant('NumberLiteralValue')).toBe(true);
-        expect(isOurMutant('FallbackOperandSubstitution')).toBe(true);
+        expect(isOurMutant('CallArgumentTweak')).toBe(true);
     });
 
     it('rejects built-in mutator names', () => {
@@ -50,7 +50,7 @@ describe('isOurMutant', () => {
         for (const m of heuristicMutators) {
             expect(isOurMutant(m.name)).toBe(true);
         }
-        expect(heuristicMutators).toHaveLength(8);
+        expect(heuristicMutators).toHaveLength(7);
     });
 });
 

@@ -55,7 +55,6 @@ export const Stage3Mode = z.enum(['off', 'confirm']);
 export const HeuristicOperator = z.enum([
     // P1 — shipped (M1)
     'NumberLiteralValue',
-    'FallbackOperandSubstitution',
     // P2 — shipped (M5)
     'CallArgumentTweak',
     'AwaitDrop',

@@ -32,7 +32,6 @@ import type {
     BooleanLiteral,
     CallExpression,
     Identifier,
-    LogicalExpression,
     MemberExpression,
     Node,
     NumericLiteral,
@@ -83,11 +82,6 @@ export interface NodePath {
     /** Narrows `node` to `Identifier`. */
     isIdentifier(): this is { readonly node: Identifier };
     /**
-     * Narrows `node` to `LogicalExpression` (`??`, `||`, `&&`). Used by
-     * `FallbackOperandSubstitution`.
-     */
-    isLogicalExpression(): this is { readonly node: LogicalExpression };
-    /**
      * Narrows `node` to `CallExpression` (`f(x)`, `xs.map(f)`, `Promise.all(xs)`).
      * Used by `CallArgumentTweak`, `ArrayMethodSwap`, `PromiseCombinatorSwap`,
      * and `StringMethodArgSwap`.
@@ -95,6 +89,8 @@ export interface NodePath {
     isCallExpression(): this is { readonly node: CallExpression };
     /** Narrows `node` to `AwaitExpression` (`await x`). Used by `AwaitDrop`. */
     isAwaitExpression(): this is { readonly node: AwaitExpression };
+    /** Narrows `node` to an expression used as a whole statement. */
+    isExpressionStatement(): boolean;
     /**
      * Narrows `node` to a plain (NON-optional) `MemberExpression` (`a.b`, `a[i]`,
      * `this.x`). `OptionalMemberExpression` (`a?.b`) is a DISTINCT node type that
@@ -119,6 +115,8 @@ export interface NodePath {
      * `NodePath` is a structural superset.
      */
     readonly parentPath?: NodePath;
+    /** Babel lexical scope; absent synthetic scopes are treated as unsafe. */
+    readonly scope?: { getBinding(name: string): { readonly kind: string } | undefined };
     /** Halts the surrounding `traverse` early (used by test helpers). */
     stop(): void;
 }

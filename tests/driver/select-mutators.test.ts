@@ -28,7 +28,7 @@ describe('selectHeuristicMutators', () => {
     it('returns ALL registered heuristics for an empty allow-list', () => {
         const result = selectHeuristicMutators(heuristics({ operators: [] }));
         expect(result.mutators.map(m => m.name)).toEqual(ALL_NAMES);
-        expect(result.mutators).toHaveLength(8);
+        expect(result.mutators).toHaveLength(7);
         expect(result.unimplemented).toEqual([]);
     });
 
@@ -36,7 +36,6 @@ describe('selectHeuristicMutators', () => {
         expect(ALL_NAMES).toEqual([
             // P1
             'NumberLiteralValue',
-            'FallbackOperandSubstitution',
             // P2
             'CallArgumentTweak',
             'AwaitDrop',
@@ -52,20 +51,18 @@ describe('selectHeuristicMutators', () => {
     it('filters to only the named operators, preserving barrel order', () => {
         // Request them out of barrel order; selection must restore barrel order.
         const result = selectHeuristicMutators(
-            heuristics({ operators: ['FallbackOperandSubstitution', 'NumberLiteralValue'] }),
+            heuristics({ operators: ['CallArgumentTweak', 'NumberLiteralValue'] }),
         );
         expect(result.mutators.map(m => m.name)).toEqual([
             'NumberLiteralValue',
-            'FallbackOperandSubstitution',
+            'CallArgumentTweak',
         ]);
         expect(result.unimplemented).toEqual([]);
     });
 
     it('selects a single operator when only one is named', () => {
-        const result = selectHeuristicMutators(
-            heuristics({ operators: ['FallbackOperandSubstitution'] }),
-        );
-        expect(result.mutators.map(m => m.name)).toEqual(['FallbackOperandSubstitution']);
+        const result = selectHeuristicMutators(heuristics({ operators: ['CallArgumentTweak'] }));
+        expect(result.mutators.map(m => m.name)).toEqual(['CallArgumentTweak']);
     });
 
     it('selects multiple operators across priorities, preserving barrel order', () => {

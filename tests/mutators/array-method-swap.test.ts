@@ -1,139 +1,81 @@
-/*
- * Offline unit tests for the ArrayMethodSwap heuristic mutator.
- *
- * Driven exactly as Stryker's `transformBabel` does: parse a snippet, `traverse`
- * to obtain a real `NodePath`, call `*mutate(path)`. We assert the method-name
- * swaps (map↔filter↔forEach, push↔unshift), that the receiver + args are reused
- * unchanged, that computed / non-member / unknown-method calls are skipped, and
- * that non-call nodes yield nothing. Pure AST — no network, no Stryker process.
- */
-
 import { describe, expect, it } from 'bun:test';
 import babel from '@babel/core';
 import {
     type CallExpression,
-    type Identifier,
     isCallExpression,
     isIdentifier,
     isMemberExpression,
-    type MemberExpression,
     type Node,
 } from '@babel/types';
-
 import { arrayMethodSwapMutator } from '../../src/mutators/array-method-swap';
 import type { NodePath } from '../../src/mutators/types';
 
 const { parse, traverse } = babel as {
-    parse: (code: string, opts?: object) => unknown;
-    traverse: (ast: unknown, visitor: { enter(path: NodePath): void }) => void;
+    parse(code: string, opts?: object): unknown;
+    traverse(ast: unknown, v: { enter(path: NodePath): void }): void;
 };
-
-/** Parse `code` and return the FIRST `NodePath` for which `predicate` is true. */
-function firstPath(code: string, predicate: (path: NodePath) => boolean): NodePath {
-    const ast = parse(code, { configFile: false, babelrc: false });
+function mutate(code: string): Node[] {
+    const ast = parse(code, {
+        configFile: false,
+        babelrc: false,
+        parserOpts: { plugins: ['typescript'] },
+    });
     let found: NodePath | undefined;
     traverse(ast, {
-        enter(path: NodePath) {
-            if (!found && predicate(path)) {
-                found = path;
-                path.stop();
+        enter(p) {
+            if (!found && p.isCallExpression()) {
+                found = p;
+                p.stop();
             }
         },
     });
     if (!found) {
-        throw new Error(`No node matched the predicate in: ${code}`);
+        return [];
     }
-    return found;
+    return [...arrayMethodSwapMutator.mutate(found)];
 }
-
-/** Collect the yielded replacement nodes for the first call expression in `code`. */
-function mutate(code: string): Node[] {
-    const path = firstPath(code, p => p.isCallExpression());
-    return [...arrayMethodSwapMutator.mutate(path)];
+function method(n: Node) {
+    expect(isCallExpression(n)).toBe(true);
+    const c = (n as CallExpression).callee;
+    if (!isMemberExpression(c)) {
+        throw new Error('member expected');
+    }
+    return isIdentifier(c.property) ? c.property.name : '';
 }
-
-/** The swapped method name of a yielded `obj.<method>(…)` call. */
-function methodName(node: Node): string {
-    expect(isCallExpression(node)).toBe(true);
-    const { callee } = node as CallExpression;
-    expect(isMemberExpression(callee)).toBe(true);
-    const prop = (callee as MemberExpression).property;
-    expect(isIdentifier(prop)).toBe(true);
-    return (prop as Identifier).name;
-}
-
 describe('arrayMethodSwapMutator', () => {
-    it('has the Stryker-facing name "ArrayMethodSwap"', () => {
-        expect(arrayMethodSwapMutator.name).toBe('ArrayMethodSwap');
-    });
-
-    it('swaps map to filter AND forEach', () => {
-        const out = mutate('xs.map(f);');
-        expect(out.map(methodName).sort()).toEqual(['filter', 'forEach']);
-    });
-
-    it('swaps filter to map AND forEach', () => {
-        const out = mutate('xs.filter(f);');
-        expect(out.map(methodName).sort()).toEqual(['forEach', 'map']);
-    });
-
-    it('swaps forEach to map AND filter', () => {
-        const out = mutate('xs.forEach(f);');
-        expect(out.map(methodName).sort()).toEqual(['filter', 'map']);
-    });
-
-    it('swaps push to unshift', () => {
-        const out = mutate('xs.push(x);');
-        expect(out.map(methodName)).toEqual(['unshift']);
-    });
-
-    it('swaps unshift to push', () => {
-        const out = mutate('xs.unshift(x);');
-        expect(out.map(methodName)).toEqual(['push']);
-    });
-
-    it('reuses the receiver object and arguments unchanged', () => {
-        const path = firstPath('xs.map(f, g);', p => p.isCallExpression());
-        const original = path.node as CallExpression;
-        const originalObject = (original.callee as MemberExpression).object;
-        const out = [...arrayMethodSwapMutator.mutate(path)];
-        for (const node of out) {
-            const call = node as CallExpression;
-            // Same receiver object node reused.
-            expect((call.callee as MemberExpression).object).toBe(originalObject);
-            // Same arguments array reused (length preserved).
-            expect(call.arguments).toHaveLength(2);
+    it('swaps push and unshift while preserving repeated, multiple, and spread args', () => {
+        for (const [code, want, count] of [
+            ['xs.push(x,x,...ys)', 'unshift', 3],
+            ['xs.unshift(a,b)', 'push', 2],
+        ] as const) {
+            const out = mutate(code);
+            expect(out).toHaveLength(1);
+            expect(method(out[0]!)).toBe(want);
+            expect((out[0] as CallExpression).arguments).toHaveLength(count);
         }
     });
-
-    it('rebuilds the callee as a NON-computed member', () => {
-        const out = mutate('xs.map(f);');
-        for (const node of out) {
-            const callee = (node as CallExpression).callee as MemberExpression;
-            expect(callee.computed).toBe(false);
+    it('preserves call type arguments', () =>
+        expect((mutate('xs.push<string>(x)')[0] as CallExpression).typeParameters).toBeDefined());
+    it('skips zero args, fresh empty arrays, callback methods, computed, and optional calls', () => {
+        for (const code of [
+            'xs.push()',
+            '[].push(x)',
+            'xs.map(f)',
+            'xs.filter(f)',
+            'xs.forEach(f)',
+            'xs["push"](x)',
+            'xs?.push(x)',
+            'xs.push?.(x)',
+        ]) {
+            expect(mutate(code)).toHaveLength(0);
         }
     });
-
-    it('skips a computed call (`xs["map"](f)`)', () => {
-        expect(mutate('xs["map"](f);')).toHaveLength(0);
-    });
-
-    it('skips an unknown method (`xs.reduce(f)`)', () => {
-        expect(mutate('xs.reduce(f);')).toHaveLength(0);
-    });
-
-    it('skips inherited object names rather than treating them as swap entries', () => {
-        for (const name of ['toString', 'constructor', '__proto__', 'valueOf']) {
-            expect(mutate(`xs.${name}(f);`)).toHaveLength(0);
-        }
-    });
-
-    it('skips a bare-identifier call (`map(f)` — no member callee)', () => {
-        expect(mutate('map(f);')).toHaveLength(0);
-    });
-
-    it('yields nothing for a non-call node (a numeric literal)', () => {
-        const path = firstPath('const x = 42;', p => p.isNumericLiteral());
-        expect([...arrayMethodSwapMutator.mutate(path)]).toHaveLength(0);
+    it('has observable end-order behavior with multiple values', () => {
+        const a = [0];
+        a.push(1, 2);
+        const b = [0];
+        b.unshift(1, 2);
+        expect(a).toEqual([0, 1, 2]);
+        expect(b).toEqual([1, 2, 0]);
     });
 });

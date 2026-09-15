@@ -490,22 +490,17 @@ the REAL `@stryker-mutator/instrumenter`.
 | Pri | Operator | Status | Match (AST) | Replacement | isambard example |
 |---|---|---|---|---|---|
 | **P1** | `NumberLiteralValue` | ✅ M1 | `NumericLiteral` (not in a Stryker-disabled span) | `n → n+1`, `n → n-1`, `n → 0` (skip when already 0) | `text.ts:34 slice(0, maxLength-1)`; `task-list-reader.ts:239 slice(0, 47)` |
-| **P1** | `FallbackOperandSubstitution` | ✅ M1 | `LogicalExpression` `??` / `\|\|` right operand | replace fallback with `undefined` / `null` / `0` / `''` (skip when already that value) | `scene-detector.ts:39 ?? duration`; `time.ts:187 ?? resolveTimezone()` |
-| P2 | `CallArgumentTweak` | ✅ M5 | `CallExpression`: numeric arg of slice/substring/substr/padStart/padEnd/repeat/splice; OR any ≥2-arg call | `±1` on each numeric arg (gated methods); swap first two args | `filename.ts:36-37`; `task-list-reader.ts:205 slice(0,10)` |
+| P2 | `CallArgumentTweak` | ✅ M5 | plain non-optional `.slice(a, b)` with exactly two distinct positional expressions | swap the two bounds; skip direct empty array/string literals | `filename.ts:36-37`; `task-list-reader.ts:205 slice(0,10)` |
 | P2 | `AwaitDrop` | ✅ M5 | `AwaitExpression` | drop `await` → yield the argument (bucket honestly — may type-error → `error` not `survived`) | repo-wide |
 | P3 | `SpreadOperandDrop` | ✅ M5 | object `SpreadElement` (in an `ObjectExpression`) | drop ONE spread per mutant | `scene-detector.ts:30` |
-| P3 | `ArrayMethodSwap` | ✅ M5 | `CallExpression` `xs.<m>(…)` where `m` ∈ {map, filter, forEach, push, unshift} | swap method name (`map`↔`filter`↔`forEach`, `push`↔`unshift`) | repo-wide |
-| P3 | `PromiseCombinatorSwap` | ✅ M5 | `CallExpression` `Promise.<c>(…)` where `c` ∈ {all, allSettled, race, any} | swap combinator (`all`→{allSettled,race}, etc.) | `path-validator.ts:51`; `session-cleanup.ts:282`; `live-signals.ts:573` |
+| P3 | `ArrayMethodSwap` | ✅ M5 | non-optional `xs.push(…)` / `xs.unshift(…)` with at least one argument | swap `push`↔`unshift`, preserving all arguments | repo-wide |
+| P3 | `PromiseCombinatorSwap` | ✅ M5 | unshadowed global `Promise.<c>(iterable)` directly awaited as a whole unused statement | small combinator swap table; skip known empty `all` and equivalent singleton `all`↔`race` | `path-validator.ts:51`; `session-cleanup.ts:282`; `live-signals.ts:573` |
 | P4 | `StringMethodArgSwap` | ✅ M5 | `CallExpression` `s.<m>(…)` where `m` ∈ {includes, startsWith, endsWith} | swap predicate method name | repo-wide |
 
-**Honest bucketing (intended).** Several operators deliberately produce mutants
-that score as `error` / `compileError` rather than `survived` — a build-time-caught
-mutant is a kill of a different colour, not a placement failure: `AwaitDrop`
-(`Promise<T>` vs `T` type errors), `ArrayMethodSwap`/`StringMethodArgSwap` return-
-or receiver-type mismatches (`forEach` drops the return value; `Array.includes`
-swapped to `startsWith` throws), `PromiseCombinatorSwap` `all`→`race` (result-shape
-change). This is
-documented in each operator's file header.
+**Compile validity.** A candidate rejected by compilation is excluded as invalid;
+it is not evidence that tests killed the mutant. The retained operators are
+scoped to reduce predictable type-changing output, though runtime receiver
+mismatches can still be reported as errors.
 
 **Volume guard.** Heuristics fire on **every** matching node across all files —
 but the run cost of that is now **Stryker's** perTest-scoped, concurrency-bounded
@@ -561,7 +556,7 @@ Extend `src/config.ts` `llmMutatorConfigSchema`. Keep `.strict()` on the
 
 ```ts
 export const HeuristicOperator = z.enum([
-  'NumberLiteralValue', 'FallbackOperandSubstitution', // P1
+  'NumberLiteralValue', // P1
   'CallArgumentTweak', 'AwaitDrop', // P2
   'SpreadOperandDrop', 'ArrayMethodSwap', 'PromiseCombinatorSwap', // P3
   'StringMethodArgSwap', // P4
@@ -662,7 +657,7 @@ load-bearing proof.
 - **Build:** (a) the **injection seam** (`src/seam/inject*`) — deep-import
   `allMutators`, clear-or-augment, push; (b) the then-current **P1 heuristics engine** —
   `NumberLiteralValue`, `BoundaryOffByOne`, `FallbackOperandSubstitution`
-  (`BoundaryOffByOne` is now retired)
+  (the latter two are now retired)
   authored as Stryker `NodeMutator`s; (c) a minimal driver: read target config,
   push P1 mutators (ours-only against isambard's 100% suite), invoke
   `new Stryker(...).runMutationTest()` on a small file set.

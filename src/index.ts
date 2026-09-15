@@ -222,7 +222,6 @@ export {
     awaitDropMutator,
     callArgumentTweakMutator,
     createLlmMutator,
-    fallbackOperandSubstitutionMutator,
     heuristicMutators,
     LLM_MUTATOR_NAME,
     type NodeMutator,

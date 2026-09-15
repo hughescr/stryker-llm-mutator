@@ -60,12 +60,9 @@ describe('llmMutatorConfigSchema — empty block defaults', () => {
 describe('llmMutatorConfigSchema — heuristics block', () => {
     it('accepts a populated operators allow-list of valid catalog names', () => {
         const cfg = llmMutatorConfigSchema.parse({
-            heuristics: { operators: ['NumberLiteralValue', 'FallbackOperandSubstitution'] },
+            heuristics: { operators: ['NumberLiteralValue', 'CallArgumentTweak'] },
         });
-        expect(cfg.heuristics.operators).toEqual([
-            'NumberLiteralValue',
-            'FallbackOperandSubstitution',
-        ]);
+        expect(cfg.heuristics.operators).toEqual(['NumberLiteralValue', 'CallArgumentTweak']);
         // Other fields still defaulted.
         expect(cfg.heuristics.enabled).toBe(true);
         expect(cfg.heuristics.skipUncovered).toBe(true);
@@ -93,6 +90,7 @@ describe('llmMutatorConfigSchema — heuristics block', () => {
             'BoundaryOffByOne',
             'ComparisonBoundaryShift',
             'DefaultParamValueTweak',
+            'FallbackOperandSubstitution',
         ]) {
             expect(() =>
                 llmMutatorConfigSchema.parse({ heuristics: { operators: [removed] } }),
@@ -171,7 +169,6 @@ describe('HeuristicOperator enum', () => {
     it('contains retained catalog entries', () => {
         const options = HeuristicOperator.options;
         expect(options).toContain('NumberLiteralValue');
-        expect(options).toContain('FallbackOperandSubstitution');
         expect(options).toContain('CallArgumentTweak');
     });
 });
