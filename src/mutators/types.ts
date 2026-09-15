@@ -108,7 +108,7 @@ export interface NodePath {
      * Narrows `node` to a plain (NON-optional) `MemberExpression` (`a.b`, `a[i]`,
      * `this.x`). `OptionalMemberExpression` (`a?.b`) is a DISTINCT node type that
      * this predicate does NOT match, so already-optional members are excluded
-     * automatically. Used by `OptionalChainForce`.
+     * automatically.
      */
     isMemberExpression(): this is { readonly node: MemberExpression };
     /**

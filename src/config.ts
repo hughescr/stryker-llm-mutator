@@ -68,7 +68,6 @@ export const HeuristicOperator = z.enum([
     'PromiseCombinatorSwap',
     // P4 — shipped (M5)
     'DefaultParamValueTweak',
-    'OptionalChainForce',
     'StringMethodArgSwap',
     'TernaryBranchSwap',
 ]);

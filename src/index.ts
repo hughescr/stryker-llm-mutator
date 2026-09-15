@@ -232,7 +232,6 @@ export {
     type NodeMutator,
     type NodePath,
     numberLiteralValueMutator,
-    optionalChainForceMutator,
     promiseCombinatorSwapMutator,
     spreadOperandDropMutator,
     stringMethodArgSwapMutator,

@@ -28,7 +28,7 @@ describe('selectHeuristicMutators', () => {
     it('returns ALL registered heuristics for an empty allow-list', () => {
         const result = selectHeuristicMutators(heuristics({ operators: [] }));
         expect(result.mutators.map(m => m.name)).toEqual(ALL_NAMES);
-        expect(result.mutators).toHaveLength(14);
+        expect(result.mutators).toHaveLength(13);
         expect(result.unimplemented).toEqual([]);
     });
 
@@ -49,7 +49,6 @@ describe('selectHeuristicMutators', () => {
             'PromiseCombinatorSwap',
             // P4
             'DefaultParamValueTweak',
-            'OptionalChainForce',
             'StringMethodArgSwap',
             'TernaryBranchSwap',
         ]);

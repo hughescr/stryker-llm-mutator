@@ -54,10 +54,11 @@ describe('withLlmMutators — heuristics path', () => {
     it('injects ALL heuristics when llmMutator is absent (default posture)', async () => {
         const clean = await withLlmMutators({ mutate: ['src/**/*.ts'] }, { log: () => {} });
         expect('llmMutator' in clean).toBe(false);
-        // The full P1–P4 catalog (14 operators) plus the 16 built-ins.
-        expect(allMutators.length).toBe(16 + 14);
+        // The full P1–P4 catalog (13 operators) plus the 16 built-ins.
+        expect(allMutators.length).toBe(16 + 13);
         expect(countByName('NumberLiteralValue')).toBe(1);
         expect(countByName('TernaryBranchSwap')).toBe(1);
+        expect(countByName('OptionalChainForce')).toBe(0);
     });
 
     it('is idempotent: re-calling with the returned (stamped) config does NOT double-register', async () => {

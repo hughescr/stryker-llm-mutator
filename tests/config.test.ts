@@ -73,9 +73,12 @@ describe('llmMutatorConfigSchema — heuristics block', () => {
         expect(cfg.heuristics.enabled).toBe(false);
     });
 
-    it('rejects an unknown operator name (closed allow-list)', () => {
+    it('rejects unknown and removed operator names (closed allow-list)', () => {
         expect(() =>
             llmMutatorConfigSchema.parse({ heuristics: { operators: ['NotARealOperator'] } }),
+        ).toThrow();
+        expect(() =>
+            llmMutatorConfigSchema.parse({ heuristics: { operators: ['OptionalChainForce'] } }),
         ).toThrow();
     });
 });

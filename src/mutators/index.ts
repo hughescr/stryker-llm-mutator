@@ -25,7 +25,6 @@ import { promiseCombinatorSwapMutator } from './promise-combinator-swap';
 import { spreadOperandDropMutator } from './spread-operand-drop';
 // P4 (M5)
 import { defaultParamValueTweakMutator } from './default-param-value-tweak';
-import { optionalChainForceMutator } from './optional-chain-force';
 import { stringMethodArgSwapMutator } from './string-method-arg-swap';
 import { ternaryBranchSwapMutator } from './ternary-branch-swap';
 
@@ -45,7 +44,6 @@ export { promiseCombinatorSwapMutator } from './promise-combinator-swap';
 export { spreadOperandDropMutator } from './spread-operand-drop';
 // P4 (M5)
 export { defaultParamValueTweakMutator } from './default-param-value-tweak';
-export { optionalChainForceMutator } from './optional-chain-force';
 export { stringMethodArgSwapMutator } from './string-method-arg-swap';
 export { ternaryBranchSwapMutator } from './ternary-branch-swap';
 
@@ -81,7 +79,6 @@ export const heuristicMutators: readonly NodeMutator[] = [
     promiseCombinatorSwapMutator,
     // P4
     defaultParamValueTweakMutator,
-    optionalChainForceMutator,
     stringMethodArgSwapMutator,
     ternaryBranchSwapMutator,
 ];

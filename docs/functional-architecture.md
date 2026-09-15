@@ -481,7 +481,7 @@ no NumericLiteral mutator among the 16, `LogicalOperator` swaps the *operator*
 not the *operand*, `EqualityOperator` swaps operators not boundary
 *literals/arithmetic*):
 
-**Status: the FULL P1–P4 catalog is IMPLEMENTED (M5).** All 14 operators ship as
+**Status: 13 P1–P4 operators are currently shipped.** They ship as
 Stryker `NodeMutator`s in `src/mutators/` (barrel `src/mutators/index.ts`,
 registry `src/driver/select-mutators.ts`), each with a sibling unit test in
 `tests/mutators/` at ~100% coverage, and each verified to place cleanly through
@@ -500,7 +500,6 @@ the REAL `@stryker-mutator/instrumenter`.
 | P3 | `ArrayMethodSwap` | ✅ M5 | `CallExpression` `xs.<m>(…)` where `m` ∈ {map, filter, forEach, push, unshift} | swap method name (`map`↔`filter`↔`forEach`, `push`↔`unshift`) | repo-wide |
 | P3 | `PromiseCombinatorSwap` | ✅ M5 | `CallExpression` `Promise.<c>(…)` where `c` ∈ {all, allSettled, race, any} | swap combinator (`all`→{allSettled,race}, etc.) | `path-validator.ts:51`; `session-cleanup.ts:282`; `live-signals.ts:573` |
 | P4 | `DefaultParamValueTweak` | ✅ M5 | `AssignmentPattern` with a numeric/boolean/string literal default | numeric `±1`/`0`, boolean flip, string `→ ''` | repo-wide |
-| P4 | `OptionalChainForce` | ✅ M5 | plain `MemberExpression` (`a.b`, `a[i]`, `this.x`; not a PrivateName) | force `?.` (emit an `OptionalMemberExpression`) | repo-wide |
 | P4 | `StringMethodArgSwap` | ✅ M5 | `CallExpression` `s.<m>(…)` where `m` ∈ {includes, startsWith, endsWith} | swap predicate method name | repo-wide |
 | P4 | `TernaryBranchSwap` | ✅ M5 | `ConditionalExpression` with non-equal branches | swap consequent/alternate (test reused) | repo-wide |
 
@@ -521,7 +520,7 @@ mutant is a kill of a different colour, not a placement failure: `AwaitDrop`
 (`Promise<T>` vs `T` type errors), `ArrayMethodSwap`/`StringMethodArgSwap` return-
 or receiver-type mismatches (`forEach` drops the return value; `Array.includes`
 swapped to `startsWith` throws), `PromiseCombinatorSwap` `all`→`race` (result-shape
-change), and `OptionalChainForce` on a non-nullable typed object. This is
+change). This is
 documented in each operator's file header.
 
 **Volume guard.** Heuristics fire on **every** matching node across all files —
@@ -581,7 +580,7 @@ export const HeuristicOperator = z.enum([
   'NumberLiteralValue', 'BoundaryOffByOne', 'FallbackOperandSubstitution',   // P1
   'ComparisonBoundaryShift', 'CallArgumentTweak', 'AwaitDrop',               // P2
   'EarlyReturnInjection', 'SpreadOperandDrop', 'ArrayMethodSwap', 'PromiseCombinatorSwap', // P3
-  'DefaultParamValueTweak', 'OptionalChainForce', 'StringMethodArgSwap', 'TernaryBranchSwap', // P4
+  'DefaultParamValueTweak', 'StringMethodArgSwap', 'TernaryBranchSwap', // P4
 ]);
 
 heuristics: z.object({
