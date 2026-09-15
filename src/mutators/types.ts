@@ -31,10 +31,8 @@ import type {
     AwaitExpression,
     BigIntLiteral,
     BinaryExpression,
-    BlockStatement,
     BooleanLiteral,
     CallExpression,
-    ConditionalExpression,
     Identifier,
     LogicalExpression,
     MemberExpression,
@@ -117,17 +115,6 @@ export interface NodePath {
      */
     isObjectExpression(): this is { readonly node: ObjectExpression };
     /**
-     * Narrows `node` to `ConditionalExpression` (the ternary `c ? p : q`). Used by
-     * `TernaryBranchSwap`.
-     */
-    isConditionalExpression(): this is { readonly node: ConditionalExpression };
-    /**
-     * Narrows `node` to `BlockStatement` (`{ ... }`). Used by
-     * `EarlyReturnInjection`, which additionally inspects {@link parentPath} to
-     * accept ONLY function-body blocks.
-     */
-    isBlockStatement(): this is { readonly node: BlockStatement };
-    /**
      * Narrows `node` to `AssignmentPattern` — a default-valued binding
      * (`a = 5` in a parameter list, or `{ a = 5 } = {}` in destructuring). Used by
      * `DefaultParamValueTweak`.
@@ -135,27 +122,16 @@ export interface NodePath {
     isAssignmentPattern(): this is { readonly node: AssignmentPattern };
     /**
      * The parent `NodePath` in the traversal, present on Stryker's real
-     * `NodePath` (and on `@babel/traverse`'s paths generally). `EarlyReturnInjection`
-     * reads it to require its matched `BlockStatement` be a FUNCTION BODY (its
-     * parent is one of the function-shape nodes) and not a plain control-flow block.
+     * `NodePath` (and on `@babel/traverse`'s paths generally). Mutators that need
+     * surrounding placement context inspect it before yielding a replacement.
      *
      * OPTIONAL by design, exactly like {@link hub}: the heuristic-mutator unit
      * tests build fake `NodePath`s via a bare `traverse` that does populate
      * `parentPath`, but other synthetic paths (and forward-compat) may omit it.
-     * A missing `parentPath` degrades `EarlyReturnInjection` to a clean no-match
-     * rather than a throw. Stryker's real `NodePath` is a structural superset.
+     * Consumers treat a missing parent as a clean no-match. Stryker's real
+     * `NodePath` is a structural superset.
      */
     readonly parentPath?: NodePath;
-    /** True when this path points at a `FunctionDeclaration` (`function f(){}`). */
-    isFunctionDeclaration(): boolean;
-    /** True when this path points at a `FunctionExpression` (`const f = function(){}`). */
-    isFunctionExpression(): boolean;
-    /** True when this path points at an `ArrowFunctionExpression` (`() => {}`). */
-    isArrowFunctionExpression(): boolean;
-    /** True when this path points at an `ObjectMethod` (`{ m() {} }`). */
-    isObjectMethod(): boolean;
-    /** True when this path points at a `ClassMethod` (`class { m() {} }`). */
-    isClassMethod(): boolean;
     /** Halts the surrounding `traverse` early (used by test helpers). */
     stop(): void;
 }

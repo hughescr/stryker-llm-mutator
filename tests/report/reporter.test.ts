@@ -50,7 +50,7 @@ describe('isOurMutant', () => {
         for (const m of heuristicMutators) {
             expect(isOurMutant(m.name)).toBe(true);
         }
-        expect(heuristicMutators).toHaveLength(13);
+        expect(heuristicMutators).toHaveLength(11);
     });
 });
 

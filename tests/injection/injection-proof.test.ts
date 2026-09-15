@@ -151,14 +151,16 @@ describe('M0 injection proof — HALF 1: registry monkeypatch (in-process, Bun)'
         // The default set is the whole heuristic barrel, in barrel order — assert
         // against the barrel itself so this self-updates as the catalog grows.
         expect(result.injectedNames).toEqual(heuristicMutators.map(m => m.name));
-        // The current P1–P4 catalog has 13 operators; spot-check a P1, a P2,
-        // the statement-shaped P3, and a P4 operator are all registered.
-        expect(result.injectedNames).toHaveLength(13);
+        // The current P1–P4 catalog has 11 operators; spot-check a P1, a P2,
+        // and retained P3/P4 operators are all registered.
+        expect(result.injectedNames).toHaveLength(11);
         expect(allMutators.some(m => m.name === 'NumberLiteralValue')).toBe(true);
         expect(allMutators.some(m => m.name === 'ComparisonBoundaryShift')).toBe(true);
-        expect(allMutators.some(m => m.name === 'EarlyReturnInjection')).toBe(true);
-        expect(allMutators.some(m => m.name === 'TernaryBranchSwap')).toBe(true);
+        expect(allMutators.some(m => m.name === 'SpreadOperandDrop')).toBe(true);
+        expect(allMutators.some(m => m.name === 'StringMethodArgSwap')).toBe(true);
         expect(allMutators.some(m => m.name === 'OptionalChainForce')).toBe(false);
+        expect(allMutators.some(m => m.name === 'EarlyReturnInjection')).toBe(false);
+        expect(allMutators.some(m => m.name === 'TernaryBranchSwap')).toBe(false);
     });
 });
 

@@ -225,7 +225,6 @@ export {
     comparisonBoundaryShiftMutator,
     createLlmMutator,
     defaultParamValueTweakMutator,
-    earlyReturnInjectionMutator,
     fallbackOperandSubstitutionMutator,
     heuristicMutators,
     LLM_MUTATOR_NAME,
@@ -235,7 +234,6 @@ export {
     promiseCombinatorSwapMutator,
     spreadOperandDropMutator,
     stringMethodArgSwapMutator,
-    ternaryBranchSwapMutator,
 } from './mutators/index';
 export { injectMutators, type InjectMutatorsOptions, type InjectMutatorsResult } from './injection';
 

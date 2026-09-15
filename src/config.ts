@@ -62,14 +62,12 @@ export const HeuristicOperator = z.enum([
     'CallArgumentTweak',
     'AwaitDrop',
     // P3 — shipped (M5)
-    'EarlyReturnInjection',
     'SpreadOperandDrop',
     'ArrayMethodSwap',
     'PromiseCombinatorSwap',
     // P4 — shipped (M5)
     'DefaultParamValueTweak',
     'StringMethodArgSwap',
-    'TernaryBranchSwap',
 ]);
 
 /** A single heuristic operator name from the {@link HeuristicOperator} catalog. */

@@ -28,7 +28,7 @@ describe('selectHeuristicMutators', () => {
     it('returns ALL registered heuristics for an empty allow-list', () => {
         const result = selectHeuristicMutators(heuristics({ operators: [] }));
         expect(result.mutators.map(m => m.name)).toEqual(ALL_NAMES);
-        expect(result.mutators).toHaveLength(13);
+        expect(result.mutators).toHaveLength(11);
         expect(result.unimplemented).toEqual([]);
     });
 
@@ -43,14 +43,12 @@ describe('selectHeuristicMutators', () => {
             'CallArgumentTweak',
             'AwaitDrop',
             // P3
-            'EarlyReturnInjection',
             'SpreadOperandDrop',
             'ArrayMethodSwap',
             'PromiseCombinatorSwap',
             // P4
             'DefaultParamValueTweak',
             'StringMethodArgSwap',
-            'TernaryBranchSwap',
         ]);
     });
 
@@ -73,12 +71,12 @@ describe('selectHeuristicMutators', () => {
 
     it('selects multiple operators across priorities, preserving barrel order', () => {
         const result = selectHeuristicMutators(
-            heuristics({ operators: ['AwaitDrop', 'NumberLiteralValue', 'TernaryBranchSwap'] }),
+            heuristics({ operators: ['AwaitDrop', 'NumberLiteralValue', 'StringMethodArgSwap'] }),
         );
         expect(result.mutators.map(m => m.name)).toEqual([
             'NumberLiteralValue',
             'AwaitDrop',
-            'TernaryBranchSwap',
+            'StringMethodArgSwap',
         ]);
         expect(result.unimplemented).toEqual([]);
     });

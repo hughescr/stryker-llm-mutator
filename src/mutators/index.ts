@@ -20,13 +20,11 @@ import { callArgumentTweakMutator } from './call-argument-tweak';
 import { comparisonBoundaryShiftMutator } from './comparison-boundary-shift';
 // P3 (M5)
 import { arrayMethodSwapMutator } from './array-method-swap';
-import { earlyReturnInjectionMutator } from './early-return-injection';
 import { promiseCombinatorSwapMutator } from './promise-combinator-swap';
 import { spreadOperandDropMutator } from './spread-operand-drop';
 // P4 (M5)
 import { defaultParamValueTweakMutator } from './default-param-value-tweak';
 import { stringMethodArgSwapMutator } from './string-method-arg-swap';
-import { ternaryBranchSwapMutator } from './ternary-branch-swap';
 
 export type { NodeMutator, NodePath } from './types';
 // P1 (M1)
@@ -39,13 +37,11 @@ export { callArgumentTweakMutator } from './call-argument-tweak';
 export { comparisonBoundaryShiftMutator } from './comparison-boundary-shift';
 // P3 (M5)
 export { arrayMethodSwapMutator } from './array-method-swap';
-export { earlyReturnInjectionMutator } from './early-return-injection';
 export { promiseCombinatorSwapMutator } from './promise-combinator-swap';
 export { spreadOperandDropMutator } from './spread-operand-drop';
 // P4 (M5)
 export { defaultParamValueTweakMutator } from './default-param-value-tweak';
 export { stringMethodArgSwapMutator } from './string-method-arg-swap';
-export { ternaryBranchSwapMutator } from './ternary-branch-swap';
 
 // The injected dynamic-LLM NodeMutator (M3): a sync map lookup over the pre-pass
 // precomputed map. NOT part of `heuristicMutators` (it is built per-run from the
@@ -58,10 +54,7 @@ export { createLlmMutator, LLM_MUTATOR_NAME } from './llm-mutator';
  * set `src/injection.ts` registers into Stryker's `allMutators`, and the order the
  * driver's `selectHeuristicMutators` preserves. M1 shipped the P1 trio; M5
  * appended P2–P4. Every operator is verified to place cleanly through the REAL
- * `@stryker-mutator/instrumenter` — the 12 expression-shaped operators by the
- * unit-test idiom + the M0 injection canary, and the single statement-shaped
- * operator `EarlyReturnInjection` by its dedicated
- * `tests/injection/early-return-placement-proof.test.ts` canary (§5 constraint 3).
+ * `@stryker-mutator/instrumenter` by the unit-test idiom + the M0 injection canary.
  */
 export const heuristicMutators: readonly NodeMutator[] = [
     // P1
@@ -73,12 +66,10 @@ export const heuristicMutators: readonly NodeMutator[] = [
     callArgumentTweakMutator,
     awaitDropMutator,
     // P3
-    earlyReturnInjectionMutator,
     spreadOperandDropMutator,
     arrayMethodSwapMutator,
     promiseCombinatorSwapMutator,
     // P4
     defaultParamValueTweakMutator,
     stringMethodArgSwapMutator,
-    ternaryBranchSwapMutator,
 ];

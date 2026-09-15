@@ -80,6 +80,12 @@ describe('llmMutatorConfigSchema — heuristics block', () => {
         expect(() =>
             llmMutatorConfigSchema.parse({ heuristics: { operators: ['OptionalChainForce'] } }),
         ).toThrow();
+        expect(() =>
+            llmMutatorConfigSchema.parse({ heuristics: { operators: ['EarlyReturnInjection'] } }),
+        ).toThrow();
+        expect(() =>
+            llmMutatorConfigSchema.parse({ heuristics: { operators: ['TernaryBranchSwap'] } }),
+        ).toThrow();
     });
 });
 

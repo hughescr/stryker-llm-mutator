@@ -481,7 +481,7 @@ no NumericLiteral mutator among the 16, `LogicalOperator` swaps the *operator*
 not the *operand*, `EqualityOperator` swaps operators not boundary
 *literals/arithmetic*):
 
-**Status: 13 P1–P4 operators are currently shipped.** They ship as
+**Status: 11 P1–P4 operators are currently shipped.** They ship as
 Stryker `NodeMutator`s in `src/mutators/` (barrel `src/mutators/index.ts`,
 registry `src/driver/select-mutators.ts`), each with a sibling unit test in
 `tests/mutators/` at ~100% coverage, and each verified to place cleanly through
@@ -495,24 +495,11 @@ the REAL `@stryker-mutator/instrumenter`.
 | P2 | `ComparisonBoundaryShift` | ✅ M5 | `BinaryExpression` `<`↔`<=`, `>`↔`>=` | flip strictness (both operands reused) | `time.ts:190 hour>=5 && hour<12` |
 | P2 | `CallArgumentTweak` | ✅ M5 | `CallExpression`: numeric arg of slice/substring/substr/padStart/padEnd/repeat/splice; OR any ≥2-arg call | `±1` on each numeric arg (gated methods); swap first two args | `filename.ts:36-37`; `task-list-reader.ts:205 slice(0,10)` |
 | P2 | `AwaitDrop` | ✅ M5 | `AwaitExpression` | drop `await` → yield the argument (bucket honestly — may type-error → `error` not `survived`) | repo-wide |
-| P3 | `EarlyReturnInjection`* | ✅ M5 | function-body `BlockStatement` (parent is a function shape; non-empty) | prepend `return;` / `return undefined;` | repo-wide |
 | P3 | `SpreadOperandDrop` | ✅ M5 | object `SpreadElement` (in an `ObjectExpression`) | drop ONE spread per mutant | `scene-detector.ts:30` |
 | P3 | `ArrayMethodSwap` | ✅ M5 | `CallExpression` `xs.<m>(…)` where `m` ∈ {map, filter, forEach, push, unshift} | swap method name (`map`↔`filter`↔`forEach`, `push`↔`unshift`) | repo-wide |
 | P3 | `PromiseCombinatorSwap` | ✅ M5 | `CallExpression` `Promise.<c>(…)` where `c` ∈ {all, allSettled, race, any} | swap combinator (`all`→{allSettled,race}, etc.) | `path-validator.ts:51`; `session-cleanup.ts:282`; `live-signals.ts:573` |
 | P4 | `DefaultParamValueTweak` | ✅ M5 | `AssignmentPattern` with a numeric/boolean/string literal default | numeric `±1`/`0`, boolean flip, string `→ ''` | repo-wide |
 | P4 | `StringMethodArgSwap` | ✅ M5 | `CallExpression` `s.<m>(…)` where `m` ∈ {includes, startsWith, endsWith} | swap predicate method name | repo-wide |
-| P4 | `TernaryBranchSwap` | ✅ M5 | `ConditionalExpression` with non-equal branches | swap consequent/alternate (test reused) | repo-wide |
-
-\* `EarlyReturnInjection` is the ONLY statement-shaped operator (it yields a
-`BlockStatement` to replace a function-body `BlockStatement`). Per §5 constraint 3,
-its placement was VERIFIED against Stryker's real placers before shipping: it
-PLACES CLEANLY because `statementMutantPlacer` (`canPlace = path.isStatement()`)
-special-cases `path.isBlockStatement()` and wraps the placed block correctly. It
-therefore SHIPS (not deferred), guarded by a dedicated offline real-instrumenter
-canary, `tests/injection/early-return-placement-proof.test.ts` (+ its
-`.mjs` Node worker), cloned from the LLM placement proof. If that canary ever fails
-on a Stryker bump, `EarlyReturnInjection` must be deferred (unregistered from the
-barrel) until the statement-placement contract is re-confirmed.
 
 **Honest bucketing (intended).** Several operators deliberately produce mutants
 that score as `error` / `compileError` rather than `survived` — a build-time-caught
@@ -579,8 +566,8 @@ Extend `src/config.ts` `llmMutatorConfigSchema`. Keep `.strict()` on the
 export const HeuristicOperator = z.enum([
   'NumberLiteralValue', 'BoundaryOffByOne', 'FallbackOperandSubstitution',   // P1
   'ComparisonBoundaryShift', 'CallArgumentTweak', 'AwaitDrop',               // P2
-  'EarlyReturnInjection', 'SpreadOperandDrop', 'ArrayMethodSwap', 'PromiseCombinatorSwap', // P3
-  'DefaultParamValueTweak', 'StringMethodArgSwap', 'TernaryBranchSwap', // P4
+  'SpreadOperandDrop', 'ArrayMethodSwap', 'PromiseCombinatorSwap', // P3
+  'DefaultParamValueTweak', 'StringMethodArgSwap', // P4
 ]);
 
 heuristics: z.object({
@@ -731,12 +718,9 @@ load-bearing proof.
 
 ### M5 — Scale / caching / resilience / CI canary *(mixed)* — **DONE**
 - **Build:** full P2–P4 heuristics (now safe under the survivor view) — **DONE:
-  all 11 P2–P4 operators are implemented as `NodeMutator`s, registered in the
-  barrel, unit-tested at ~100%, and verified to place through the real
-  instrumenter** (the 10 expression-shaped ones by the unit-test idiom + the M0
-  injection canary; the single statement-shaped `EarlyReturnInjection` by its own
-  `tests/injection/early-return-placement-proof.test.ts` canary, which proved it
-  places cleanly — so it ships rather than deferring). Plus, also DONE:
+  the current eight P2–P4 operators are implemented as `NodeMutator`s, registered
+  in the barrel, unit-tested at ~100%, and verified to place through the real
+  instrumenter**. Plus, also DONE:
   - **The per-version monkeypatch canary (§3.4) is wired into CI.** A single
     consolidated `tests/injection/canary.test.ts` (+ `canary-worker.mjs`) asserts,
     in one Node-subprocess round-trip, the FOUR load-bearing invariants:
@@ -748,8 +732,8 @@ load-bearing proof.
     `hour >= 12 → hour > 12` survivor). A `bun run canary` script runs it in
     isolation, and `.github/workflows/ci.yml` runs the six gates in order then the
     canary as a final named "per-version monkeypatch canary" step. The two detailed
-    proofs (`injection-proof` + `llm-placement-proof` + `early-return-placement-
-    proof`) remain for regression depth. (Open-question #5: Stryker is pinned to
+    proofs (`injection-proof` + `llm-placement-proof`) remain for regression depth.
+    (Open-question #5: Stryker is pinned to
     exactly 9.6.1; the workflow carries a commented matrix stub to widen the range.)
   - **Cold-run non-determinism documented + frozen-set mode shipped** (§3.4). The
     config gains `dynamicLLM.frozen` and the CLI gains `--frozen`; the budgeted
