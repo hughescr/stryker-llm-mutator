@@ -86,6 +86,19 @@ describe('createBudgetedProvider', () => {
         expect(cost.snapshot()).toEqual({ totalUsd: 0.5, calls: 2 });
     });
 
+    it('MISS: changed system instructions do not reuse a cached response', async () => {
+        const inner = new MockProvider({ responder: () => ({ v: 7 }), costUsd: 0.5 });
+        const p = wrap(inner);
+
+        await p.generate(req({ system: 'first instructions' }));
+        const same = await p.generate(req({ system: 'first instructions' }));
+        const changed = await p.generate(req({ system: 'changed instructions' }));
+
+        expect(same.cached).toBe(true);
+        expect(changed.cached).toBe(false);
+        expect(inner.calls).toHaveLength(2);
+    });
+
     it('honors a request-supplied cacheKey over the content-addressed default', async () => {
         const inner = new MockProvider({ responder: () => ({ v: 3 }), costUsd: 0.1 });
         const p = wrap(inner);

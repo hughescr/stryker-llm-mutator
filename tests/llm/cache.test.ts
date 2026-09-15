@@ -29,6 +29,12 @@ describe('computeCacheKey', () => {
         expect(computeCacheKey({ ...PARTS, prompt: 'different' })).not.toBe(computeCacheKey(PARTS));
     });
 
+    it('changes when system instructions change', () => {
+        expect(computeCacheKey({ ...PARTS, system: 'different instructions' })).not.toBe(
+            computeCacheKey(PARTS),
+        );
+    });
+
     it('changes when the schema changes', () => {
         expect(computeCacheKey({ ...PARTS, schema: { type: 'array' } })).not.toBe(
             computeCacheKey(PARTS),

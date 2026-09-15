@@ -13,7 +13,7 @@
  * already collected (a partial map still drives a useful Stryker run).
  *
  * Content-addressing: every call is keyed by `req.cacheKey ?? computeCacheKey(
- * {model, prompt, schema})`. A cache HIT reconstructs a `ProviderResult` with
+ * {model, prompt, system, schema})`. A cache HIT reconstructs a `ProviderResult` with
  * `costUsd: 0, cached: true`, records a zero-cost call (so the call COUNT still
  * advances), and never hits the network — so warm re-runs and overlapping spans
  * are free. A MISS delegates, then records the real cost and stores the entry.
@@ -116,6 +116,7 @@ export function createBudgetedProvider(
                 computeCacheKey({
                     model: request.model ?? defaultModel,
                     prompt: request.prompt,
+                    system: request.system,
                     schema: request.schema,
                 });
 

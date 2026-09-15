@@ -188,6 +188,9 @@ describe('propose — node-aligned sub-expression contract', () => {
         expect(seen?.prompt).toContain('up to 3');
         expect(seen?.system).toContain('mutation-testing');
         expect(seen?.system).toContain('sub-expression');
+        expect(seen?.system).toContain('Do NOT add optional chaining');
+        expect(seen?.system).toContain('concrete, reachable runtime-nullish receiver path');
+        expect(seen?.system).toContain('TypeScript annotation, cast, or non-null assertion');
         expect(seen?.model).toBe('claude-opus-4-1');
         expect(seen?.cacheKey).toBe('span-abc');
 

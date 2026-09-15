@@ -183,6 +183,7 @@ const PROPOSE_SYSTEM = [
     '- put the edited sub-expression in "replacement", keeping it a syntactically valid expression that is valid IN PLACE where "original" sits;',
     '- ensure both "original" and "replacement" are syntactically valid in place, and that the change alters runtime behavior a good test should catch;',
     '- prefer plausible real bugs (off-by-one, flipped condition, wrong operator, swapped argument, dropped guard, wrong boundary literal, etc.).',
+    'Do NOT add optional chaining (`?.`) when the supplied code proves the receiver non-nullish. Consider it only when the supplied code shows a concrete, reachable runtime-nullish receiver path whose behavior would change; if no such runtime possibility is shown, choose another mutation. A TypeScript annotation, cast, or non-null assertion alone proves neither condition.',
     'Do NOT propose semantically-equivalent rewrites. Do NOT change identifiers that are not part of the behavior. Do NOT echo the whole function.',
     'Return ONLY the structured object; no prose outside it.',
 ].join('\n');
