@@ -194,11 +194,11 @@ export function createLlmMutator(map: LlmMutatorMap, log?: (line: string) => voi
 function placementError(path: NodePath, replacement: Node): string | undefined {
     const runtimePath = path as NodePath & {
         key: string | number;
-        listKey?: string;
+        listKey?: string | null;
         parentPath?: {
             node: Record<string, unknown>;
             scope?: { getBinding(name: string): { kind: string } | undefined };
-        };
+        } | null;
         scope?: { getBinding(name: string): { kind: string } | undefined };
     };
     if (replacement.type === 'AssignmentExpression' && replacement.left.type === 'Identifier') {
@@ -212,7 +212,7 @@ function placementError(path: NodePath, replacement: Node): string | undefined {
         return undefined;
     }
     try {
-        if (runtimePath.listKey !== undefined) {
+        if (runtimePath.listKey !== undefined && runtimePath.listKey !== null) {
             const original = parent.node[runtimePath.listKey];
             if (!Array.isArray(original)) {
                 return `Expected parent list ${runtimePath.listKey}`;

@@ -259,4 +259,55 @@ describe('createLlmMutator', () => {
         expect([...createLlmMutator(map, line => notes.push(line)).mutate(path)]).toHaveLength(0);
         expect(notes).toHaveLength(1);
     });
+
+    it('treats Babel 8 null listKey as an ordinary parent field', () => {
+        const file = '/abs/babel8-object-value.ts';
+        const path = pathFor(
+            'const result = { signal: signal };',
+            p =>
+                p.isIdentifier() &&
+                (p.node as { name?: string }).name === 'signal' &&
+                p.parentPath?.node.type === 'ObjectProperty' &&
+                (p as unknown as { key?: string }).key === 'value',
+            file,
+        );
+        const babel8Path = Object.create(path) as NodePath;
+        Object.defineProperty(babel8Path, 'listKey', { value: null });
+        const map = singleEntryMap(
+            file,
+            locKeyFromBabelLoc(path.node.loc!),
+            entryFor('null', 'llm/babel8-object-value'),
+        );
+        expect([...createLlmMutator(map).mutate(babel8Path)]).toHaveLength(1);
+    });
+
+    it('preserves undefined scalar and string listKey placement paths', () => {
+        const file = '/abs/list-key.ts';
+        const scalar = pathFor(
+            'const result = { signal: signal };',
+            p =>
+                p.isIdentifier() &&
+                (p.node as { name?: string }).name === 'signal' &&
+                (p as unknown as { key?: string }).key === 'value',
+            file,
+        );
+        const array = pathFor(
+            'const values = [signal];',
+            p => p.isIdentifier() && (p.node as { name?: string }).name === 'signal',
+            file,
+        );
+        for (const [path, listKey] of [
+            [scalar, undefined],
+            [array, 'elements'],
+        ] as const) {
+            const shaped = Object.create(path) as NodePath;
+            Object.defineProperty(shaped, 'listKey', { value: listKey });
+            const map = singleEntryMap(
+                file,
+                locKeyFromBabelLoc(path.node.loc!),
+                entryFor('null', 'llm/list-key'),
+            );
+            expect([...createLlmMutator(map).mutate(shaped)]).toHaveLength(1);
+        }
+    });
 });

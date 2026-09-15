@@ -184,6 +184,54 @@ describe('optionalChainForceMutator', () => {
         expect([...optionalChainForceMutator.mutate(path)]).toHaveLength(0);
     });
 
+    it('accepts Babel 8 null parentPath and listKey on a read member', () => {
+        const path = firstPath(
+            'const value = holder.value;',
+            p => p.node.type === 'MemberExpression',
+        );
+        const babel8Path = Object.create(path) as NodePath;
+        Object.defineProperties(babel8Path, {
+            parentPath: { value: null },
+            listKey: { value: null },
+        });
+        expect([...optionalChainForceMutator.mutate(babel8Path)]).toHaveLength(1);
+    });
+
+    it('lifts a Babel 8 null-listKey inner write receiver through its scalar parent', () => {
+        const root = firstPath('obj.a.b = 1;', p => p.node.type === 'AssignmentExpression');
+        const babel8Root = root as NodePath & {
+            get(
+                name: string,
+            ): NodePath & { traverse(visitor: { MemberExpression(path: NodePath): void }): void };
+        };
+        const originalGet = (root as unknown as { get(name: string): NodePath }).get.bind(root);
+        Object.defineProperty(root, 'get', {
+            value(name: string) {
+                const target = originalGet(name) as NodePath & {
+                    traverse(visitor: { MemberExpression(path: NodePath): void }): void;
+                };
+                const wrapped = Object.create(target) as typeof target;
+                Object.defineProperty(wrapped, 'traverse', {
+                    value(visitor: { MemberExpression(path: NodePath): void }) {
+                        target.traverse({
+                            MemberExpression(path: NodePath) {
+                                const babel8Inner = Object.create(path) as NodePath;
+                                Object.defineProperty(babel8Inner, 'listKey', { value: null });
+                                visitor.MemberExpression(babel8Inner);
+                            },
+                        });
+                    },
+                });
+                return wrapped;
+            },
+        });
+        const out = [...optionalChainForceMutator.mutate(babel8Root)];
+        expect(out).toHaveLength(1);
+        expect((out[0] as { left: { object: Node } }).left.object.type).toBe(
+            'OptionalMemberExpression',
+        );
+    });
+
     it('does NOT match an already-optional member (`a?.b` is an OptionalMemberExpression)', () => {
         const ast = parse('const x = a?.b;', { configFile: false, babelrc: false });
         let sawPlainMember = false;

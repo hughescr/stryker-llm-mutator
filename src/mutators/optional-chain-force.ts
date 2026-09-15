@@ -66,9 +66,9 @@ import type { NodeMutator } from './types';
 type RuntimePath = {
     readonly node: Node;
     readonly hub?: { readonly file?: { readonly opts?: { readonly filename?: string } } };
-    readonly parentPath?: RuntimePath;
+    readonly parentPath?: RuntimePath | null;
     readonly key?: string | number;
-    readonly listKey?: string;
+    readonly listKey?: string | null;
     isAssignmentExpression(): boolean;
     isUpdateExpression(): boolean;
     isForInStatement(): boolean;
@@ -91,7 +91,7 @@ type RuntimePath = {
 
 function isWriteTarget(path: RuntimePath): boolean {
     let current = path;
-    while (current.parentPath !== undefined) {
+    while (current.parentPath !== undefined && current.parentPath !== null) {
         const parent = current.parentPath;
         if (
             (parent.isAssignmentExpression() && current.key === 'left') ||
@@ -162,11 +162,11 @@ function liftOptionalReceiver(path: RuntimePath, root: RuntimePath): Node {
     let current = path;
     while (current !== root) {
         const parent = current.parentPath;
-        if (parent === undefined) {
+        if (parent === undefined || parent === null) {
             throw new Error('Missing parent while lifting optional receiver');
         }
         const cloned = cloneNode(parent.node, true) as unknown as Record<string, unknown>;
-        if (current.listKey !== undefined) {
+        if (current.listKey !== undefined && current.listKey !== null) {
             const list = cloned[current.listKey] as Node[];
             list[current.key as number] = replacement;
         } else {
