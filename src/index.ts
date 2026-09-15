@@ -220,11 +220,8 @@ export {
 export {
     arrayMethodSwapMutator,
     awaitDropMutator,
-    boundaryOffByOneMutator,
     callArgumentTweakMutator,
-    comparisonBoundaryShiftMutator,
     createLlmMutator,
-    defaultParamValueTweakMutator,
     fallbackOperandSubstitutionMutator,
     heuristicMutators,
     LLM_MUTATOR_NAME,

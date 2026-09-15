@@ -35,7 +35,7 @@ describe('buildRunPlan — mutator wiring', () => {
         // The default selection is the whole heuristic barrel (full P1–P4 catalog),
         // in barrel order — assert against the barrel so this self-updates.
         expect(plan.injectedMutators.map(m => m.name)).toEqual(heuristicMutators.map(m => m.name));
-        expect(plan.injectedMutators).toHaveLength(11);
+        expect(plan.injectedMutators).toHaveLength(8);
         expect(plan.selection.unimplemented).toEqual([]);
         expect(plan.mode).toBe('augment');
         expect(plan.live).toBe(false);
@@ -45,10 +45,10 @@ describe('buildRunPlan — mutator wiring', () => {
     it('injects only the allow-listed operators', () => {
         const plan = buildRunPlan(
             options(),
-            config({ heuristics: { operators: ['BoundaryOffByOne'] } }),
+            config({ heuristics: { operators: ['FallbackOperandSubstitution'] } }),
             undefined,
         );
-        expect(plan.injectedMutators.map(m => m.name)).toEqual(['BoundaryOffByOne']);
+        expect(plan.injectedMutators.map(m => m.name)).toEqual(['FallbackOperandSubstitution']);
     });
 
     it('injects nothing when heuristics are disabled', () => {

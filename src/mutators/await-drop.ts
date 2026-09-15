@@ -11,7 +11,7 @@
  * AUTHORING IDIOM — identical to the P1 trio, but with NO factory: the
  * replacement is the original `node.argument`, which is already a valid
  * `Expression` from the parse, yielded directly (the same "reuse the operand
- * node" move `BoundaryOffByOne`'s drop uses).
+ * node" move used by arithmetic mutators).
  *
  * MATCH: `path.isAwaitExpression()`. Every `AwaitExpression` is a candidate; no
  * further structural condition.

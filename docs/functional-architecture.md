@@ -145,8 +145,8 @@ also remains a documented contingency; see §3.)
   mutant ids or manifest. Stryker's collector assigns ids and emits the standard
   report; our mutators only supply `{ name, mutate }`. Distinctness comes from the
   mutator `name`, which flows into the report's `mutatorName`. SHIPPED NAMES are
-  bare PascalCase per operator (`NumberLiteralValue`, `BoundaryOffByOne`,
-  `ComparisonBoundaryShift`, … the full §5 catalog) and the single name `llm` for
+  bare PascalCase per operator (`NumberLiteralValue`, `CallArgumentTweak`, … the
+  full §5 catalog) and the single name `llm` for
   the dynamic-LLM mutator — NOT the `heuristic/<op>` / `llm/<tag>` forms some older
   diagrams below still show (the per-candidate `llm/<tag>` tag lives only inside the
   filtered report artifact, §6). Distinctness from the 16 built-ins holds because
@@ -481,7 +481,7 @@ no NumericLiteral mutator among the 16, `LogicalOperator` swaps the *operator*
 not the *operand*, `EqualityOperator` swaps operators not boundary
 *literals/arithmetic*):
 
-**Status: 11 P1–P4 operators are currently shipped.** They ship as
+**Status: 8 P1–P4 operators are currently shipped.** They ship as
 Stryker `NodeMutator`s in `src/mutators/` (barrel `src/mutators/index.ts`,
 registry `src/driver/select-mutators.ts`), each with a sibling unit test in
 `tests/mutators/` at ~100% coverage, and each verified to place cleanly through
@@ -490,15 +490,12 @@ the REAL `@stryker-mutator/instrumenter`.
 | Pri | Operator | Status | Match (AST) | Replacement | isambard example |
 |---|---|---|---|---|---|
 | **P1** | `NumberLiteralValue` | ✅ M1 | `NumericLiteral` (not in a Stryker-disabled span) | `n → n+1`, `n → n-1`, `n → 0` (skip when already 0) | `text.ts:34 slice(0, maxLength-1)`; `task-list-reader.ts:239 slice(0, 47)` |
-| **P1** | `BoundaryOffByOne` | ✅ M1 | `BinaryExpression` `i+1` / `len-1` (exactly one operand the literal `1`) | swap `+1↔-1`, drop the `±1` | `scene-detector.ts:34 i < boundaries.length-1`; `:39 boundaries[i+1]` |
 | **P1** | `FallbackOperandSubstitution` | ✅ M1 | `LogicalExpression` `??` / `\|\|` right operand | replace fallback with `undefined` / `null` / `0` / `''` (skip when already that value) | `scene-detector.ts:39 ?? duration`; `time.ts:187 ?? resolveTimezone()` |
-| P2 | `ComparisonBoundaryShift` | ✅ M5 | `BinaryExpression` `<`↔`<=`, `>`↔`>=` | flip strictness (both operands reused) | `time.ts:190 hour>=5 && hour<12` |
 | P2 | `CallArgumentTweak` | ✅ M5 | `CallExpression`: numeric arg of slice/substring/substr/padStart/padEnd/repeat/splice; OR any ≥2-arg call | `±1` on each numeric arg (gated methods); swap first two args | `filename.ts:36-37`; `task-list-reader.ts:205 slice(0,10)` |
 | P2 | `AwaitDrop` | ✅ M5 | `AwaitExpression` | drop `await` → yield the argument (bucket honestly — may type-error → `error` not `survived`) | repo-wide |
 | P3 | `SpreadOperandDrop` | ✅ M5 | object `SpreadElement` (in an `ObjectExpression`) | drop ONE spread per mutant | `scene-detector.ts:30` |
 | P3 | `ArrayMethodSwap` | ✅ M5 | `CallExpression` `xs.<m>(…)` where `m` ∈ {map, filter, forEach, push, unshift} | swap method name (`map`↔`filter`↔`forEach`, `push`↔`unshift`) | repo-wide |
 | P3 | `PromiseCombinatorSwap` | ✅ M5 | `CallExpression` `Promise.<c>(…)` where `c` ∈ {all, allSettled, race, any} | swap combinator (`all`→{allSettled,race}, etc.) | `path-validator.ts:51`; `session-cleanup.ts:282`; `live-signals.ts:573` |
-| P4 | `DefaultParamValueTweak` | ✅ M5 | `AssignmentPattern` with a numeric/boolean/string literal default | numeric `±1`/`0`, boolean flip, string `→ ''` | repo-wide |
 | P4 | `StringMethodArgSwap` | ✅ M5 | `CallExpression` `s.<m>(…)` where `m` ∈ {includes, startsWith, endsWith} | swap predicate method name | repo-wide |
 
 **Honest bucketing (intended).** Several operators deliberately produce mutants
@@ -519,7 +516,7 @@ clean first proof; P2–P4 land after the survivor view + equivalent filtering
 preference where a coverage signal is available.
 
 **Equivalence/disable-comment handling.** Our operators ship under BARE PascalCase
-names (`NumberLiteralValue`, `BoundaryOffByOne`, `ComparisonBoundaryShift`, …) and
+names (`NumberLiteralValue`, `CallArgumentTweak`, …) and
 the dynamic-LLM mutator under the single name `llm` — NOT `heuristic/<op>` /
 `llm/<tag>` (the per-candidate `llm/<tag>` tag survives only inside the filtered
 report artifact's `mutatorName`, not as the Stryker operator name). Disable-comment
@@ -534,7 +531,7 @@ case-insensitively-matched names OR the wildcard `all`, then filters out
   heuristic mutants AND the `llm` mutant — the wildcard matches everything,
   including our names. **Confirmed clean win, no code needed.**
 - `// Stryker disable NumberLiteralValue` (or `disable llm`, `disable
-  BoundaryOffByOne`, …) WORKS going forward — our names are in the live list the
+  CallArgumentTweak`, …) WORKS going forward — our names are in the live list the
   bookkeeper was built with (case-insensitive match), so a user CAN suppress a
   specific re-surfaced equivalent by name.
 - A pre-existing `// Stryker disable EqualityOperator` (a BUILT-IN name) does NOT
@@ -564,10 +561,10 @@ Extend `src/config.ts` `llmMutatorConfigSchema`. Keep `.strict()` on the
 
 ```ts
 export const HeuristicOperator = z.enum([
-  'NumberLiteralValue', 'BoundaryOffByOne', 'FallbackOperandSubstitution',   // P1
-  'ComparisonBoundaryShift', 'CallArgumentTweak', 'AwaitDrop',               // P2
+  'NumberLiteralValue', 'FallbackOperandSubstitution', // P1
+  'CallArgumentTweak', 'AwaitDrop', // P2
   'SpreadOperandDrop', 'ArrayMethodSwap', 'PromiseCombinatorSwap', // P3
-  'DefaultParamValueTweak', 'StringMethodArgSwap', // P4
+  'StringMethodArgSwap', // P4
 ]);
 
 heuristics: z.object({
@@ -661,10 +658,11 @@ load-bearing proof.
   monkeypatch surface (§3.4).
 - **Network:** none. This IS the load-bearing proof; everything else assumes it.
 
-### M1 — Heuristics-only end-to-end against isambard via stock Stryker *(NO LLM, NO credentials — the first proof of value)*
+### M1 — Historical P1 proof against isambard via stock Stryker *(NO LLM, NO credentials)*
 - **Build:** (a) the **injection seam** (`src/seam/inject*`) — deep-import
-  `allMutators`, clear-or-augment, push; (b) the **P1 heuristics engine** —
+  `allMutators`, clear-or-augment, push; (b) the then-current **P1 heuristics engine** —
   `NumberLiteralValue`, `BoundaryOffByOne`, `FallbackOperandSubstitution`
+  (`BoundaryOffByOne` is now retired)
   authored as Stryker `NodeMutator`s; (c) a minimal driver: read target config,
   push P1 mutators (ours-only against isambard's 100% suite), invoke
   `new Stryker(...).runMutationTest()` on a small file set.
@@ -718,7 +716,7 @@ load-bearing proof.
 
 ### M5 — Scale / caching / resilience / CI canary *(mixed)* — **DONE**
 - **Build:** full P2–P4 heuristics (now safe under the survivor view) — **DONE:
-  the current eight P2–P4 operators are implemented as `NodeMutator`s, registered
+  the current six P2–P4 operators are implemented as `NodeMutator`s, registered
   in the barrel, unit-tested at ~100%, and verified to place through the real
   instrumenter**. Plus, also DONE:
   - **The per-version monkeypatch canary (§3.4) is wired into CI.** A single

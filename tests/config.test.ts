@@ -60,9 +60,12 @@ describe('llmMutatorConfigSchema — empty block defaults', () => {
 describe('llmMutatorConfigSchema — heuristics block', () => {
     it('accepts a populated operators allow-list of valid catalog names', () => {
         const cfg = llmMutatorConfigSchema.parse({
-            heuristics: { operators: ['NumberLiteralValue', 'BoundaryOffByOne'] },
+            heuristics: { operators: ['NumberLiteralValue', 'FallbackOperandSubstitution'] },
         });
-        expect(cfg.heuristics.operators).toEqual(['NumberLiteralValue', 'BoundaryOffByOne']);
+        expect(cfg.heuristics.operators).toEqual([
+            'NumberLiteralValue',
+            'FallbackOperandSubstitution',
+        ]);
         // Other fields still defaulted.
         expect(cfg.heuristics.enabled).toBe(true);
         expect(cfg.heuristics.skipUncovered).toBe(true);
@@ -86,6 +89,15 @@ describe('llmMutatorConfigSchema — heuristics block', () => {
         expect(() =>
             llmMutatorConfigSchema.parse({ heuristics: { operators: ['TernaryBranchSwap'] } }),
         ).toThrow();
+        for (const removed of [
+            'BoundaryOffByOne',
+            'ComparisonBoundaryShift',
+            'DefaultParamValueTweak',
+        ]) {
+            expect(() =>
+                llmMutatorConfigSchema.parse({ heuristics: { operators: [removed] } }),
+            ).toThrow();
+        }
     });
 });
 
@@ -156,10 +168,10 @@ describe('llmMutatorConfigSchema — strictness', () => {
 });
 
 describe('HeuristicOperator enum', () => {
-    it('contains the shipped P1 trio', () => {
+    it('contains retained catalog entries', () => {
         const options = HeuristicOperator.options;
         expect(options).toContain('NumberLiteralValue');
-        expect(options).toContain('BoundaryOffByOne');
         expect(options).toContain('FallbackOperandSubstitution');
+        expect(options).toContain('CallArgumentTweak');
     });
 });

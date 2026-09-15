@@ -11,36 +11,30 @@
 
 import type { NodeMutator } from './types';
 // P1 (M1)
-import { boundaryOffByOneMutator } from './boundary-off-by-one';
 import { fallbackOperandSubstitutionMutator } from './fallback-operand-substitution';
 import { numberLiteralValueMutator } from './number-literal-value';
 // P2 (M5)
 import { awaitDropMutator } from './await-drop';
 import { callArgumentTweakMutator } from './call-argument-tweak';
-import { comparisonBoundaryShiftMutator } from './comparison-boundary-shift';
 // P3 (M5)
 import { arrayMethodSwapMutator } from './array-method-swap';
 import { promiseCombinatorSwapMutator } from './promise-combinator-swap';
 import { spreadOperandDropMutator } from './spread-operand-drop';
 // P4 (M5)
-import { defaultParamValueTweakMutator } from './default-param-value-tweak';
 import { stringMethodArgSwapMutator } from './string-method-arg-swap';
 
 export type { NodeMutator, NodePath } from './types';
 // P1 (M1)
-export { boundaryOffByOneMutator } from './boundary-off-by-one';
 export { fallbackOperandSubstitutionMutator } from './fallback-operand-substitution';
 export { numberLiteralValueMutator } from './number-literal-value';
 // P2 (M5)
 export { awaitDropMutator } from './await-drop';
 export { callArgumentTweakMutator } from './call-argument-tweak';
-export { comparisonBoundaryShiftMutator } from './comparison-boundary-shift';
 // P3 (M5)
 export { arrayMethodSwapMutator } from './array-method-swap';
 export { promiseCombinatorSwapMutator } from './promise-combinator-swap';
 export { spreadOperandDropMutator } from './spread-operand-drop';
 // P4 (M5)
-export { defaultParamValueTweakMutator } from './default-param-value-tweak';
 export { stringMethodArgSwapMutator } from './string-method-arg-swap';
 
 // The injected dynamic-LLM NodeMutator (M3): a sync map lookup over the pre-pass
@@ -59,10 +53,8 @@ export { createLlmMutator, LLM_MUTATOR_NAME } from './llm-mutator';
 export const heuristicMutators: readonly NodeMutator[] = [
     // P1
     numberLiteralValueMutator,
-    boundaryOffByOneMutator,
     fallbackOperandSubstitutionMutator,
     // P2
-    comparisonBoundaryShiftMutator,
     callArgumentTweakMutator,
     awaitDropMutator,
     // P3
@@ -70,6 +62,5 @@ export const heuristicMutators: readonly NodeMutator[] = [
     arrayMethodSwapMutator,
     promiseCombinatorSwapMutator,
     // P4
-    defaultParamValueTweakMutator,
     stringMethodArgSwapMutator,
 ];

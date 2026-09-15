@@ -44,7 +44,7 @@
  *   • The ±1 tweak fires only on `NumericLiteral` args (an `Identifier` index, a
  *     `BigIntLiteral`, etc. are skipped) and only for the gated length-ish methods.
  *   • Overlaps with `NumberLiteralValue` on the numeric arg (distinct mutants),
- *     acceptable per the `BoundaryOffByOne` precedent.
+ *     acceptable for this focused mutation family.
  */
 
 import {

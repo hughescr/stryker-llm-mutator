@@ -149,7 +149,7 @@ describe('fallbackOperandSubstitutionMutator', () => {
     });
 
     it('yields nothing for a non-logical node (a binary expression `a + b`)', () => {
-        const path = firstPath('const x = a + b;', p => p.isBinaryExpression());
+        const path = firstPath('const x = a + b;', p => p.node.type === 'BinaryExpression');
         expect([...fallbackOperandSubstitutionMutator.mutate(path)]).toHaveLength(0);
     });
 

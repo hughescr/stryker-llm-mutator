@@ -1,7 +1,7 @@
 @hughescr/stryker-llm-mutator
 =============================
 
-Extra, more semantically interesting mutants for [Stryker](https://stryker-mutator.io/) — a set of 11 deterministic **heuristic** operators plus an optional **dynamic‑LLM** pre‑pass (default model **`claude-haiku-4-5`**) — that you wire into your `stryker.conf.mjs` and then run with **stock `stryker run`**. No separate runner.
+Extra, more semantically interesting mutants for [Stryker](https://stryker-mutator.io/) — a set of 8 deterministic **heuristic** operators plus an optional **dynamic‑LLM** pre‑pass (default model **`claude-haiku-4-5`**) — that you wire into your `stryker.conf.mjs` and then run with **stock `stryker run`**. No separate runner.
 
 > **What this is, honestly.** Stryker v9 has **no public "Mutator" plugin kind** — the operator set is hardcoded inside its instrumenter. This package is therefore **not a sanctioned plugin**: it is a **monkeypatch** that pushes custom `NodeMutator`s into the instrumenter's mutable, module‑level `allMutators` array (resolved at runtime against *your* hoisted instrumenter instance), then lets **stock Stryker** do all the rest — sandboxing, perTest coverage, concurrency, checkers, incremental mode, and every reporter. Our mutants show up in your normal Stryker report, tagged by `mutatorName` (bare PascalCase for heuristics, e.g. `NumberLiteralValue`; `llm` for dynamic‑LLM). It also ships a real `PluginKind.Reporter` plugin (`llm-mutator`) for a survivor + cost view. Use at your own risk — and read [Limitations](#limitations-read-before-adopting) first. Architecture detail lives in [docs/functional-architecture.md](./docs/functional-architecture.md).
 
@@ -33,7 +33,7 @@ Wrap your existing Stryker config with `withLlmMutators(...)` in `stryker.conf.m
 
 ### Heuristics only (synchronous — no credentials, no network, $0)
 
-The default posture. The 11 deterministic operators only. `withLlmMutators` always returns a Promise, so you **must** `await` it — Stryker reads the config module's `default` export only after the module's top-level `await`s settle, and it does **not** unwrap a Promise `default`. Omitting `await` makes Stryker see an empty `{}` and silently drop your `testRunner`/`plugins`/`reporters`.
+The default posture. The 8 deterministic operators only. `withLlmMutators` always returns a Promise, so you **must** `await` it — Stryker reads the config module's `default` export only after the module's top-level `await`s settle, and it does **not** unwrap a Promise `default`. Omitting `await` makes Stryker see an empty `{}` and silently drop your `testRunner`/`plugins`/`reporters`.
 
 ```js
 // stryker.conf.mjs
@@ -48,7 +48,7 @@ export default await withLlmMutators({
     llmMutator: {
         heuristics: {
             enabled: true,   // default ON
-            operators: [],   // [] = all 11 operators; else an allow-list of names
+            operators: [],   // [] = all 8 operators; else an allow-list of names
             skipUncovered: true,
         },
     },
@@ -136,7 +136,7 @@ Everything lives under `llmMutator`. Both switches default such that an empty `l
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `heuristics.enabled` | `true` | The deterministic, network‑free operators. |
-| `heuristics.operators` | `[]` | `[]` = all 11 (P1–P4); else an allow‑list of operator names. |
+| `heuristics.operators` | `[]` | `[]` = all 8 (P1–P4); else an allow-list of operator names. |
 | `heuristics.skipUncovered` | `true` | Deprioritize zero‑coverage spans where a coverage signal exists. |
 | `dynamicLLM.enabled` | `false` | The targeted LLM pre‑pass + injected `llm` mutator. Costs money + needs credentials. |
 | `dynamicLLM.frozen` | `false` | Cache‑only deterministic re‑score (a cache miss yields no mutant, no network) — the CI gate. |
@@ -148,7 +148,7 @@ Everything lives under `llmMutator`. Both switches default such that an empty `l
 
 **On `dynamicLLM.parallelBatches`.** Default `1` is the original strictly sequential pre‑pass. Raising it slices the EV‑ranked targets into consecutive waves of that size and fires a whole wave of Haiku `propose()` calls at once, which overlaps the model round‑trips and speeds up **cold** (cache‑miss) runs. Honest, bounded tradeoffs: the hard `maxCostUsd`/`maxLlmCallsPerRun` ceilings can **overshoot by up to `parallelBatches − 1` calls** (that many may be in flight when a ceiling trips — they're only checked between calls), the diminishing‑returns stop is evaluated **per wave** so it may run up to `parallelBatches − 1` calls past the sequential stop point, and very high values may hit the provider's **API rate limits**. There is no hard maximum — pick a value your quota tolerates.
 
-The 11 heuristic operators (allow-list names for `heuristics.operators`): **P1** `NumberLiteralValue`, `BoundaryOffByOne`, `FallbackOperandSubstitution`; **P2** `ComparisonBoundaryShift`, `CallArgumentTweak`, `AwaitDrop`; **P3** `SpreadOperandDrop`, `ArrayMethodSwap`, `PromiseCombinatorSwap`; **P4** `DefaultParamValueTweak`, `StringMethodArgSwap`. Some — `AwaitDrop` and the type-changing method swaps — honestly produce mutants that score as `error`/`compileError` rather than `survived`; a build-time-caught mutant is still a kill.
+The 8 heuristic operators (allow-list names for `heuristics.operators`): **P1** `NumberLiteralValue`, `FallbackOperandSubstitution`; **P2** `CallArgumentTweak`, `AwaitDrop`; **P3** `SpreadOperandDrop`, `ArrayMethodSwap`, `PromiseCombinatorSwap`; **P4** `StringMethodArgSwap`. Some — `AwaitDrop` and the type-changing method swaps — honestly produce mutants that score as `error`/`compileError` rather than `survived`; a build-time-caught mutant is still a kill.
 
 Live proof
 ----------

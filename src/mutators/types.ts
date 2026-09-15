@@ -27,10 +27,8 @@
  */
 
 import type {
-    AssignmentPattern,
     AwaitExpression,
     BigIntLiteral,
-    BinaryExpression,
     BooleanLiteral,
     CallExpression,
     Identifier,
@@ -85,11 +83,6 @@ export interface NodePath {
     /** Narrows `node` to `Identifier`. */
     isIdentifier(): this is { readonly node: Identifier };
     /**
-     * Narrows `node` to `BinaryExpression` (e.g. `i + 1`, `len - 1`, `a < b`).
-     * Used by `BoundaryOffByOne` (and later the P2 `ComparisonBoundaryShift`).
-     */
-    isBinaryExpression(): this is { readonly node: BinaryExpression };
-    /**
      * Narrows `node` to `LogicalExpression` (`??`, `||`, `&&`). Used by
      * `FallbackOperandSubstitution`.
      */
@@ -114,12 +107,6 @@ export interface NodePath {
      * `SpreadOperandDrop`.
      */
     isObjectExpression(): this is { readonly node: ObjectExpression };
-    /**
-     * Narrows `node` to `AssignmentPattern` — a default-valued binding
-     * (`a = 5` in a parameter list, or `{ a = 5 } = {}` in destructuring). Used by
-     * `DefaultParamValueTweak`.
-     */
-    isAssignmentPattern(): this is { readonly node: AssignmentPattern };
     /**
      * The parent `NodePath` in the traversal, present on Stryker's real
      * `NodePath` (and on `@babel/traverse`'s paths generally). Mutators that need
