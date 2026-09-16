@@ -162,8 +162,8 @@ export interface AnthropicAgentProviderOptions {
      *   fewer turns, on the same subscription path. See
      *   {@link AnthropicAgentOutputMode}.
      *
-     * This is a provider-internal toggle the benchmark exercises; the factory
-     * still constructs the provider in the `'json_schema'` default for now.
+     * This is a provider-internal toggle the benchmark exercises; the production
+     * factory explicitly selects `'json_schema'`.
      */
     outputMode?: AnthropicAgentOutputMode;
     /**
@@ -185,9 +185,9 @@ export interface AnthropicAgentProviderOptions {
      * pins a budget. Disabling it trades reasoning for latency — appropriate for the
      * MECHANICAL propose task.
      *
-     * UNSET (the default) does NOT forward `thinking` at all, so the SDK's own default
-     * (adaptive thinking) stands and production behavior is unchanged. This is a
-     * pass-through knob the benchmark exercises; the factory leaves it unset.
+     * UNSET (the class default) does NOT forward `thinking` at all, so the SDK's own
+     * default (adaptive thinking) stands. This is a pass-through knob the benchmark
+     * exercises; the production factory explicitly disables thinking.
      */
     thinking?: ThinkingConfig;
 }
@@ -360,7 +360,7 @@ export class AnthropicAgentProvider implements LLMProvider {
         this.#outputMode = options.outputMode ?? 'json_schema';
         // No defaulting: keep these possibly-undefined so an unset option forwards
         // NOTHING and the SDK's own defaults (effort 'high' + adaptive thinking)
-        // stand — production behavior is unchanged until a benchmark picks a winner.
+        // stand for direct construction; the production factory can override them.
         this.#effort = options.effort;
         this.#thinking = options.thinking;
     }

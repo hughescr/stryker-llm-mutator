@@ -172,7 +172,7 @@ LLM provider plan
 
 The plugin codes against a single `LLMProvider` abstraction ("given a prompt and a JSON schema, return a validated object"), so the backend is pluggable. The first implemented provider is the Anthropic **Agent SDK** subscription path (`@anthropic-ai/claude-agent-sdk`, default model `claude-haiku-4-5`, auth `CLAUDE_CODE_OAUTH_TOKEN`). A raw per‑user Anthropic **API‑key** path and OpenAI(‑compatible) providers implement the same interface and are planned (they currently throw `NotImplementedError`). Offline tests never touch the network — they inject a mock provider returning canned schema‑valid objects. See [docs/development-plan.md](./docs/development-plan.md) §4.1 / §6.
 
-For latency, the Agent SDK provider defaults to **extended thinking disabled** + **prompt‑and‑parse** output (it asks for raw JSON in the prompt and validates locally) rather than deep reasoning + the SDK's multi‑turn `json_schema` emit/validate loop. Measured live, that combo is **≈5‑6x faster** (~6.6s vs ~50s per call) with candidates valid every iteration — a deliberate trade of reasoning depth for speed that suits the mechanical propose task.
+In production, the Agent SDK provider uses the SDK's multi-turn **`json_schema` structured-output mode** and disables extended thinking. The SDK receives the caller's exact schema as `outputFormat`, validates the emitted object, and can re-prompt on mismatch; disabling extended thinking avoids unnecessary reasoning latency for the mechanical propose task. Prompt-and-parse remains an internal benchmark option rather than the production default.
 
 Development
 ----------
