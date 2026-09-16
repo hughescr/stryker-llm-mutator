@@ -264,6 +264,8 @@ function alignDropReasonText(reason: AlignDropReason, original: string): string 
             return `original \`${snippet}\` crosses node boundaries (no single AST node)`;
         case 'not-an-expression':
             return `original \`${snippet}\` aligns to a statement, not an expression`;
+        case 'not-expression-placeable':
+            return `original \`${snippet}\` is not expression-placeable by Stryker (a key, binding or declaration id would be statement-placed)`;
     }
 }
 
@@ -290,7 +292,7 @@ function resolveAlignInputs(target: ProposeTarget): {
  * NODE-ALIGNING its sub-expression `original` (never model-derived coordinates).
  * On a successful alignment the `range` is the aligned EXPRESSION node's range and
  * `original` is the verbatim sub-expression; on failure the candidate is dropped
- * with a typed reason (the four §4 Gate 4 conditions). Returns the `Replacement`
+ * with a typed reason (the five §4 Gate 4 conditions). Returns the `Replacement`
  * or the `DroppedReplacement` describing the drop.
  */
 function toReplacement(
@@ -333,7 +335,7 @@ function toReplacement(
  * function (`./range-align`) so its `range` equals a REAL EXPRESSION node — the
  * invariant the map-builder + `LLMMutator` + Stryker's expression placer require.
  * Candidates that fail alignment (not-found / ambiguous / non-node-aligned /
- * not-an-expression) are returned in `dropped` (NOT emitted). Beyond alignment
+ * not-an-expression / not-expression-placeable) are returned in `dropped` (NOT emitted). Beyond alignment
  * this performs NO filtering except truncating to `maxCandidates` — parse-check,
  * `replacement === original` rejection, dedup, and near-equivalence are the job of
  * `./filters` + `./near-equivalence`, which this stage's output feeds into. The

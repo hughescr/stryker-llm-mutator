@@ -211,15 +211,17 @@ describe('runPrePass', () => {
 
     it('emits ONE per-function drop summary with M/T + non-zero buckets in fixed order', async () => {
         // 1 survivor + drops across every node-alignment category so the bucket
-        // ORDER (unaligned, statement, ambiguous, not-found) can be asserted. The
-        // function has two `a`s so a bare `a` is ambiguous.
-        const fn = 'function f(a) {\n    return a > a ? a : 0;\n}';
+        // ORDER (unaligned, statement, unplaceable, ambiguous, not-found) can be
+        // asserted. The function has two `a`s so a bare `a` is ambiguous; its
+        // name `pick` is a declaration id Stryker cannot expression-place.
+        const fn = 'function pick(a) {\n    return a > a ? a : 0;\n}';
         const inner = new MockProvider({
             responder: () => ({
                 candidates: [
                     candidate('a < a ? a : 0', 'ok', 'a > a ? a : 0'), // aligns → survives
                     candidate('a ? a', 'cross', 'a ? a'), // crosses nodes → non-node-aligned
                     candidate('return 0;', 'stmt', 'return a > a ? a : 0;'), // → not-an-expression
+                    candidate('pick2', 'name', 'pick'), // declaration id → not-expression-placeable
                     candidate('b', 'amb', 'a'), // appears twice → ambiguous
                     candidate('z - 1', 'gone', 'z + 9'), // absent → not-found
                 ],
@@ -227,15 +229,18 @@ describe('runPrePass', () => {
             costUsd: 0,
         });
         const lines: string[] = [];
-        await runPrePass(budgeted(inner), [target('/abs/h.ts', 117, fn)], cfg(), {
+        const result = await runPrePass(budgeted(inner), [target('/abs/h.ts', 117, fn)], cfg(), {
             cost,
             log: l => lines.push(l),
         });
+        expect(
+            result.dropped.some(d => d.reason.includes('is not expression-placeable by Stryker')),
+        ).toBe(true);
         const summary = lines.filter(l => l.includes('— dropped '));
         expect(summary).toHaveLength(1);
-        // 4 drops of 5 candidates; buckets in the fixed order, each non-zero once.
+        // 5 drops of 6 candidates; buckets in the fixed order, each non-zero once.
         expect(summary[0]).toBe(
-            'stryker-llm: h.ts:118 — dropped 4/5 (1 unaligned, 1 statement, 1 ambiguous, 1 not-found)',
+            'stryker-llm: h.ts:118 — dropped 5/6 (1 unaligned, 1 statement, 1 unplaceable, 1 ambiguous, 1 not-found)',
         );
     });
 

@@ -121,3 +121,219 @@ describe('alignCandidateRange — robustness', () => {
         expect(ok.original).toBe('a * c');
     });
 });
+
+/*
+ * THE isambard `export class` CRASH (review-handler.ts:21). `@babel/types`'
+ * `isExpression()` is a NODE-TYPE check, so an Identifier always passes — but
+ * Stryker's expression placer uses babel-traverse's virtual `path.isExpression()`,
+ * which for an Identifier requires it to be REFERENCED. A method/property key or
+ * a declaration id is NOT referenced, so no expression placer accepts it; Stryker
+ * bubbles the mutant to the nearest Statement ancestor and the statement placer
+ * wraps THAT in `if (…) {…} else {…}` — illegal as the `declaration` of an
+ * Export*Declaration (`Property declaration of ExportNamedDeclaration expected
+ * node to be of a type ["Declaration"] but instead got "IfStatement"`), and a
+ * scope-breaking block wrap for any other declaration. These candidates MUST be
+ * dropped at align time with the typed `not-expression-placeable` reason.
+ */
+describe('alignCandidateRange — not-expression-placeable (Stryker placement simulation)', () => {
+    const NOT_PLACEABLE = { dropped: true, reason: 'not-expression-placeable' } as const;
+
+    it('drops a ClassMethod key inside `export class` (the isambard review-handler crash)', () => {
+        const file =
+            'export class ReviewHandler {\n' +
+            '    private async dispatchReviewAction(prefix: string): Promise<void> {\n' +
+            '        return;\n' +
+            '    }\n' +
+            '}\n';
+        const start = file.indexOf('private');
+        const end = file.indexOf('    }\n') + 6;
+        const result = alignCandidateRange(file, start, end, 'dispatchReviewAction');
+        expect(result).toEqual(NOT_PLACEABLE);
+    });
+
+    it('drops a ClassMethod key inside `export default class`', () => {
+        const file = 'export default class {\n    run(a) {\n        return a;\n    }\n}\n';
+        const result = alignCandidateRange(file, 0, file.length, 'run');
+        expect(result).toEqual(NOT_PLACEABLE);
+    });
+
+    it('drops a ClassProperty key inside an exported class', () => {
+        const file = 'export class Box {\n    private readonly size: number = 1;\n}\n';
+        const result = alignCandidateRange(file, 0, file.length, 'size');
+        expect(result).toEqual(NOT_PLACEABLE);
+    });
+
+    it('drops the id of `export function` (the FunctionDeclaration is the export declaration)', () => {
+        const file = 'export function isAfternoon(hour) {\n    return hour >= 12;\n}\n';
+        const result = alignCandidateRange(file, 0, file.length, 'isAfternoon');
+        expect(result).toEqual(NOT_PLACEABLE);
+    });
+
+    it('drops the id of `export const` (the VariableDeclaration is the export declaration)', () => {
+        const file = 'export const limit = 12;\n';
+        const result = alignCandidateRange(file, 0, file.length, 'limit');
+        expect(result).toEqual(NOT_PLACEABLE);
+    });
+
+    it('drops a ClassMethod key in a NON-exported class too (an if-wrapped class is block-scoped)', () => {
+        const file = 'class Box {\n    open() {\n        return 1;\n    }\n}\n';
+        const result = alignCandidateRange(file, 0, file.length, 'open');
+        expect(result).toEqual(NOT_PLACEABLE);
+    });
+
+    it('drops a function parameter binding (bubbles to the FunctionDeclaration statement)', () => {
+        const file = 'function f(hour) {\n    return 1;\n}\n';
+        const result = alignCandidateRange(file, 0, file.length, 'hour');
+        expect(result).toEqual(NOT_PLACEABLE);
+    });
+
+    it('keeps a COMPUTED class-member key (a referenced expression, self-placeable)', () => {
+        // A COMPUTED key IS a referenced expression → Stryker's expression placer
+        // takes it at the key itself; it must NOT be dropped.
+        const file = 'class Box {\n    [name]() {\n        return 1;\n    }\n}\n';
+        const result = alignCandidateRange(file, 0, file.length, 'name');
+        expect(expectSuccess(result).original).toBe('name');
+    });
+
+    it('keeps a chain member that bubbles to an EXPRESSION placement (Stryker places at the call)', () => {
+        // `o.a` is the object of the callee member chain → not self-placeable, but
+        // Stryker bubbles to the `o.a.b()` CallExpression, an expression placement.
+        const file = 'function f(o) {\n    return o.a.b();\n}\n';
+        const result = alignCandidateRange(file, 0, file.length, 'o.a');
+        expect(expectSuccess(result).original).toBe('o.a');
+    });
+
+    it('keeps a non-computed member property name at a call site (bubbles to the CallExpression)', () => {
+        // `moveMessage` is a NON-referenced Identifier, but its ancestors reach the
+        // `this.client.moveMessage(uid)` CallExpression — an expression placement.
+        const file = 'function f(uid) {\n    return this.client.moveMessage(uid);\n}\n';
+        const result = alignCandidateRange(file, 0, file.length, 'moveMessage');
+        expect(expectSuccess(result).original).toBe('moveMessage');
+    });
+
+    it('keeps a non-computed object-literal key (bubbles to the ObjectExpression)', () => {
+        const file = 'function f() {\n    return { flags: 1 };\n}\n';
+        const result = alignCandidateRange(file, 0, file.length, 'flags');
+        expect(expectSuccess(result).original).toBe('flags');
+    });
+
+    it('keeps an assignment target member (bubbles to the AssignmentExpression)', () => {
+        const file = 'function f(o) {\n    o.count = 1;\n}\n';
+        const result = alignCandidateRange(file, 0, file.length, 'o.count');
+        expect(expectSuccess(result).original).toBe('o.count');
+    });
+
+    it('keeps a `delete` operand and a tagged-template tag (bubble to the Unary/TaggedTemplate expression)', () => {
+        const file = 'function f(o) {\n    delete o.k;\n    return html`x`;\n}\n';
+        expect(expectSuccess(alignCandidateRange(file, 0, file.length, 'o.k')).original).toBe(
+            'o.k',
+        );
+        expect(expectSuccess(alignCandidateRange(file, 0, file.length, 'html')).original).toBe(
+            'html',
+        );
+    });
+
+    it('keeps a non-null-asserted chain member (bubbles past the TSNonNullExpression)', () => {
+        const file = 'function f(o) {\n    return o.a!.b;\n}\n';
+        expect(expectSuccess(alignCandidateRange(file, 0, file.length, 'o.a')).original).toBe(
+            'o.a',
+        );
+    });
+
+    it('keeps a bare referenced identifier in a return (self-placeable)', () => {
+        const file = 'function f() {\n    return hour;\n}\n';
+        expect(expectSuccess(alignCandidateRange(file, 0, file.length, 'hour')).original).toBe(
+            'hour',
+        );
+    });
+
+    it('drops a class declared INSIDE an arrow body (the walk stops at the ClassDeclaration statement)', () => {
+        // Without the statement stop the walk would run on to the enclosing
+        // ArrowFunctionExpression (an expression placement) and wrongly keep it.
+        const file =
+            'const make = () => {\n' +
+            '    class Box {\n        open() {\n            return 1;\n        }\n    }\n' +
+            '    return Box;\n};\n';
+        expect(alignCandidateRange(file, 0, file.length, 'open')).toEqual(NOT_PLACEABLE);
+    });
+
+    it('drops a destructured binding (ObjectProperty value under an ObjectPattern is not referenced)', () => {
+        const file = 'function f(o) {\n    const { a: b } = o;\n    return 1;\n}\n';
+        expect(alignCandidateRange(file, 0, file.length, 'b')).toEqual(NOT_PLACEABLE);
+    });
+
+    /*
+     * The `isValidExpression` mirror. A computed key inside a DESTRUCTURING
+     * pattern is the one expression position whose Stryker bubble ends at a
+     * STATEMENT (the VariableDeclaration) rather than at an expression, so each
+     * invalid-position rule is pinned by a candidate there: correct mirroring
+     * bubbles-and-drops, while placing at the node itself would wrongly keep it.
+     */
+    it('drops a computed object-pattern key (object-property-key rule → bubbles to the declaration)', () => {
+        const file = 'function f(o) {\n    const { [key]: value } = o;\n    return value;\n}\n';
+        expect(alignCandidateRange(file, 0, file.length, 'key')).toEqual(NOT_PLACEABLE);
+    });
+
+    it('drops chain members under a computed pattern key (member / call / non-null chain rules)', () => {
+        const member = 'function f(o, obj) {\n    const { [o.a.b]: v } = obj;\n    return v;\n}\n';
+        expect(alignCandidateRange(member, 0, member.length, 'o.a')).toEqual(NOT_PLACEABLE);
+
+        const call = 'function f(o, obj) {\n    const { [o.a().b]: v } = obj;\n    return v;\n}\n';
+        expect(alignCandidateRange(call, 0, call.length, 'o.a()')).toEqual(NOT_PLACEABLE);
+
+        const nonNull =
+            'function f(o, obj) {\n    const { [o.a!.b]: v } = obj;\n    return v;\n}\n';
+        expect(alignCandidateRange(nonNull, 0, nonNull.length, 'o.a!')).toEqual(NOT_PLACEABLE);
+        expect(alignCandidateRange(nonNull, 0, nonNull.length, 'o.a')).toEqual(NOT_PLACEABLE);
+
+        const callee = 'function f(o, obj) {\n    const { [o.a()]: v } = obj;\n    return v;\n}\n';
+        expect(alignCandidateRange(callee, 0, callee.length, 'o.a')).toEqual(NOT_PLACEABLE);
+    });
+
+    it('drops OPTIONAL chain members under a computed pattern key', () => {
+        const member = 'function f(o, obj) {\n    const { [o?.a.b]: v } = obj;\n    return v;\n}\n';
+        expect(alignCandidateRange(member, 0, member.length, 'o?.a')).toEqual(NOT_PLACEABLE);
+
+        const call =
+            'function f(o, obj) {\n    const { [o.a?.().b]: v } = obj;\n    return v;\n}\n';
+        expect(alignCandidateRange(call, 0, call.length, 'o.a?.()')).toEqual(NOT_PLACEABLE);
+
+        const callee =
+            'function f(o, obj) {\n    const { [o.a?.()]: v } = obj;\n    return v;\n}\n';
+        expect(alignCandidateRange(callee, 0, callee.length, 'o.a')).toEqual(NOT_PLACEABLE);
+    });
+
+    it('keeps a COMPUTED member property even under a computed pattern key (the chain exception)', () => {
+        // `x.y` is the computed property of `o[x.y]` — NOT part of the chain, so
+        // Stryker places at `x.y` itself.
+        const file =
+            'function f(o, x, obj) {\n    const { [o[x.y]]: v } = obj;\n    return v;\n}\n';
+        expect(expectSuccess(alignCandidateRange(file, 0, file.length, 'x.y')).original).toBe(
+            'x.y',
+        );
+    });
+
+    it('drops a tagged-template tag, a delete operand and an assignment target under a computed pattern key', () => {
+        const tagged = 'function f(obj) {\n    const { [html`x`]: v } = obj;\n    return v;\n}\n';
+        expect(alignCandidateRange(tagged, 0, tagged.length, 'html')).toEqual(NOT_PLACEABLE);
+
+        const del =
+            'function f(o, obj) {\n    const { [delete o.k]: v } = obj;\n    return v;\n}\n';
+        expect(alignCandidateRange(del, 0, del.length, 'o.k')).toEqual(NOT_PLACEABLE);
+
+        const assign =
+            'function f(o, obj) {\n    const { [o.count = 1]: v } = obj;\n    return v;\n}\n';
+        expect(alignCandidateRange(assign, 0, assign.length, 'o.count')).toEqual(NOT_PLACEABLE);
+    });
+
+    it('keeps a non-delete unary operand and an assignment SOURCE under a computed pattern key', () => {
+        const neg = 'function f(o, obj) {\n    const { [-o.k]: v } = obj;\n    return v;\n}\n';
+        expect(expectSuccess(alignCandidateRange(neg, 0, neg.length, 'o.k')).original).toBe('o.k');
+
+        const assign =
+            'function f(o, obj) {\n    const { [o.count = o.next]: v } = obj;\n    return v;\n}\n';
+        expect(
+            expectSuccess(alignCandidateRange(assign, 0, assign.length, 'o.next')).original,
+        ).toBe('o.next');
+    });
+});

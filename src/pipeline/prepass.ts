@@ -175,8 +175,8 @@ function logHeartbeat(
  * Format: `stryker-llm: file:line — dropped M/T (buckets)` where `M` is this
  * call's total drops (node-alignment + near-equivalent), `T` is every candidate
  * the model returned for this call, and `buckets` lists ONLY the non-zero
- * categories in this fixed order: unaligned, statement, ambiguous, not-found,
- * equivalent.
+ * categories in this fixed order: unaligned, statement, unplaceable, ambiguous,
+ * not-found, equivalent.
  *
  * `replacements` is the count of node-ALIGNED candidates (`proposed.replacements`)
  * — near-equivalent drops are a SUBSET of those, so `T = replacements + alignDrops`
@@ -198,6 +198,7 @@ function logDropSummary(
     const alignDrops =
         (dropCounts['non-node-aligned'] ?? 0) +
         (dropCounts['not-an-expression'] ?? 0) +
+        (dropCounts['not-expression-placeable'] ?? 0) +
         (dropCounts.ambiguous ?? 0) +
         (dropCounts['not-found'] ?? 0);
     const dropped = alignDrops + equivalent;
@@ -217,6 +218,7 @@ function logDropSummary(
     };
     add(dropCounts['non-node-aligned'] ?? 0, 'unaligned');
     add(dropCounts['not-an-expression'] ?? 0, 'statement');
+    add(dropCounts['not-expression-placeable'] ?? 0, 'unplaceable');
     add(dropCounts.ambiguous ?? 0, 'ambiguous');
     add(dropCounts['not-found'] ?? 0, 'not-found');
     add(equivalent, 'equivalent');
@@ -269,7 +271,7 @@ function processProposeResult(
     state.callsIssued += 1;
 
     // Node-alignment drops (not-found / ambiguous / non-node-aligned /
-    // not-an-expression) join the run's drop log for the JSON report. Their
+    // not-an-expression / not-expression-placeable) join the run's drop log for the JSON report. Their
     // per-candidate detail stays OFF stdout — the one-line per-function summary
     // below rolls them up by typed category instead of flooding the console.
     state.dropped.push(...proposed.dropped);

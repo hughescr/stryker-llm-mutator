@@ -229,4 +229,103 @@ describe('LLM placement proof — expression edit replaces an expression node (N
         expect(res.output).toContain('hour > 12');
         expect(res.output).toContain('hour >= 12');
     });
+
+    /*
+     * THE `export class` REGRESSION (isambard review-handler.ts:21, 2026-09). A
+     * ClassMethod KEY is an Identifier — an Expression by node type, so the old
+     * `not-an-expression` gate passed it — but Stryker's expression placer uses
+     * babel-traverse's virtual `path.isExpression()`, which rejects a non-
+     * referenced Identifier. No ancestor up to the ClassDeclaration is an
+     * expression, so Stryker fell to the STATEMENT placer on the class and its
+     * `if`-wrap is illegal as an ExportNamedDeclaration's `declaration`:
+     *   statementMutantPlacer could not place mutants with type(s): "llm" …
+     *   Property declaration of ExportNamedDeclaration expected node to be of a
+     *   type ["Declaration"] but instead got "IfStatement"
+     */
+    describe('export class — a method-key candidate never reaches the statement placer', () => {
+        const CLASS_FIXTURE_NAME = 'greeter.ts';
+        const CLASS_FIXTURE_SOURCE =
+            'export class Greeter {\n' +
+            "    greet(name: string): string {\n        return 'hi ' + name;\n    }\n" +
+            '}\n';
+        // The `greet` key Identifier: babel line 2 → Stryker line 1, columns [4, 9).
+        const GREET_KEY_RANGE = { start: { line: 1, column: 4 }, end: { line: 1, column: 9 } };
+
+        it('PROVES THE HAZARD: a replacement keyed to the method-key range makes Stryker throw the isambard error', async () => {
+            // Hand-built (bypassing range-align) — exactly what the pre-fix pipeline
+            // emitted for `dispatchReviewAction` → `dispatchReviewAction_alt`.
+            const unguarded: Replacement[] = [
+                {
+                    fileName: CLASS_FIXTURE_NAME,
+                    range: GREET_KEY_RANGE,
+                    original: 'greet',
+                    replacement: 'greet_alt',
+                    mutatorName: 'llm/method-name-typo',
+                },
+            ];
+            const res = await runWorker(
+                bundlePath,
+                CLASS_FIXTURE_SOURCE,
+                CLASS_FIXTURE_NAME,
+                unguarded,
+            );
+            expect(res.mapSize).toBe(1);
+            expect(res.instrumented).toBe(false);
+            expect(res.threw).toContain('statementMutantPlacer could not place mutants');
+            expect(res.threw).toContain('Property declaration of ExportNamedDeclaration');
+            expect(res.threw).toContain('but instead got "IfStatement"');
+        });
+
+        it('DROPS the method-key candidate at align time (not-expression-placeable) and instruments the rest cleanly', async () => {
+            const provider = new MockProvider({
+                responder: () => ({
+                    candidates: [
+                        {
+                            original: 'greet',
+                            replacement: 'greet_alt',
+                            mutatorTag: 'method-name-typo',
+                            rationale: 'Rename the method.',
+                        },
+                        {
+                            original: "'hi ' + name",
+                            replacement: "'hi' + name",
+                            mutatorTag: 'literal-string-swap',
+                            rationale: 'Drop the separator space.',
+                        },
+                    ],
+                }),
+                costUsd: 0,
+            });
+            const target: ProposeTarget = {
+                fileName: CLASS_FIXTURE_NAME,
+                range: { start: { line: 1, column: 4 }, end: { line: 3, column: 5 } },
+                spanText: CLASS_FIXTURE_SOURCE,
+                context: CLASS_FIXTURE_SOURCE,
+                fileContent: CLASS_FIXTURE_SOURCE,
+                spanStartOffset: CLASS_FIXTURE_SOURCE.indexOf('greet('),
+                spanEndOffset: CLASS_FIXTURE_SOURCE.lastIndexOf('    }') + 5,
+            };
+            const { replacements, dropped, dropCounts } = await propose(provider, target);
+            // The key rename is dropped with the typed reason; the expression edit aligns.
+            expect(dropCounts).toEqual({ 'not-expression-placeable': 1 });
+            expect(dropped).toHaveLength(1);
+            expect(dropped[0]!.reason).toContain('`greet`');
+            expect(replacements).toHaveLength(1);
+            expect(replacements[0]!.original).toBe("'hi ' + name");
+
+            const res = await runWorker(
+                bundlePath,
+                CLASS_FIXTURE_SOURCE,
+                CLASS_FIXTURE_NAME,
+                replacements,
+            );
+            expect(res.threw).toBeUndefined();
+            expect(res.instrumented).toBe(true);
+            expect(res.ours).toHaveLength(1);
+            expect(res.ours[0]!.replacement).toBe("'hi' + name");
+            expect(res.hasSwitch).toBe(true);
+            // The class is untouched by any statement-placer wrap.
+            expect(res.output).toContain('export class Greeter');
+        });
+    });
 });

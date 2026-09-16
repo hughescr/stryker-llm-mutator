@@ -351,6 +351,26 @@ describe('propose — node-alignment drop conditions', () => {
         expect(dropped[0]?.reason).toContain('aligns to a statement, not an expression');
     });
 
+    it('DROPS a candidate whose node Stryker cannot expression-place (not-expression-placeable)', async () => {
+        // The function NAME `max` is an Identifier — an Expression by node type —
+        // but it is the FunctionDeclaration's id, not a referenced expression, so
+        // Stryker would fall to the statement placer (the isambard `export class`
+        // crash shape). It must be dropped with the typed reason.
+        const provider = makeMockProvider({
+            candidates: [
+                { original: 'max', replacement: 'max_alt', mutatorTag: 'typo', rationale: 'n' },
+            ],
+        });
+
+        const { replacements, dropped, dropCounts } = await propose(provider, TARGET);
+
+        expect(replacements).toHaveLength(0);
+        expect(dropped).toHaveLength(1);
+        expect(dropped[0]?.reason).toContain('is not expression-placeable by Stryker');
+        expect(dropped[0]?.reason).toContain('`max`');
+        expect(dropCounts).toEqual({ 'not-expression-placeable': 1 });
+    });
+
     it('keeps the alignable candidates and drops only the failing ones', async () => {
         const provider = makeMockProvider({
             candidates: [
