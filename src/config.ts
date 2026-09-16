@@ -18,7 +18,7 @@ import { z } from 'zod';
  * The default model for all LLM calls. The first provider is the Anthropic
  * subscription path via the Agent SDK driving this model (development-plan §4.1 / §6).
  */
-export const DEFAULT_MODEL = 'claude-haiku-4-5';
+export const DEFAULT_MODEL = 'haiku';
 
 /**
  * Identifiers for the LLM provider backing the pipeline. All sit behind the
@@ -78,7 +78,7 @@ export const llmMutatorConfigSchema = z
     .object({
         /** Which provider implementation to construct. Default: the dev subscription path. */
         provider: ProviderName.default('anthropic-agent-sdk'),
-        /** Model id passed to the provider. Default `claude-haiku-4-5`. */
+        /** Model id or alias passed to the provider. Default `haiku`. */
         model: z.string().min(1).default(DEFAULT_MODEL),
         /**
          * Budget caps bounding LLM spend. Stage-1 risk targeting keeps only the

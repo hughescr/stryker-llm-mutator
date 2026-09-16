@@ -5,7 +5,7 @@
  *
  * This package widens Stryker's mutation coverage two ways: a set of formulaic,
  * network-free HEURISTIC mutators (the P1–P4 catalog), and an optional
- * DYNAMIC-LLM pre-pass (default model `claude-haiku-4-5`) that proposes localized,
+ * DYNAMIC-LLM pre-pass (default model alias `haiku`) that proposes localized,
  * behavior-changing edits a fixed operator table cannot express.
  *
  * ARCHITECTURE — MONKEYPATCH-INJECTION (functional-architecture §3). Stryker v9

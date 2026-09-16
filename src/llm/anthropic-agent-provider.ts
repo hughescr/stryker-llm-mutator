@@ -1,7 +1,7 @@
 /*
  * Anthropic Agent SDK provider — the FIRST provider (development-plan §4.1, §6).
  *
- * Drives `claude-haiku-4-5` through `@anthropic-ai/claude-agent-sdk`'s `query()`
+ * Drives the `haiku` model alias through `@anthropic-ai/claude-agent-sdk`'s `query()`
  * on the Anthropic SUBSCRIPTION path, authenticated with
  * `CLAUDE_CODE_OAUTH_TOKEN`. The Agent SDK is AGENTIC — it may take several
  * internal turns to satisfy the requested JSON schema — so this provider asks
@@ -90,8 +90,8 @@ const PROMPT_MODE_MAX_TURNS = 2;
 /** Construction options for {@link AnthropicAgentProvider}. */
 export interface AnthropicAgentProviderOptions {
     /**
-     * Default model id for calls that do not override it. Defaults to
-     * {@link DEFAULT_MODEL} (`claude-haiku-4-5`).
+     * Default model id or alias for calls that do not override it. Defaults to
+     * {@link DEFAULT_MODEL} (`haiku`).
      */
     model?: string;
     /**

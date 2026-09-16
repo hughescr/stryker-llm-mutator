@@ -70,8 +70,8 @@ export interface ProviderRequest {
      */
     system?: string;
     /**
-     * Optional model override for this single call. When omitted, the provider
-     * uses the model it was constructed with (default `claude-haiku-4-5`).
+     * Optional model id or alias override for this single call. When omitted, the provider
+     * uses the model it was constructed with (default `haiku`).
      * Present so a stage can opt a specific call onto a different model without
      * a second provider instance.
      */

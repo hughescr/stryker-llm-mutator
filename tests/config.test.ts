@@ -21,7 +21,8 @@ describe('llmMutatorConfigSchema — empty block defaults', () => {
 
         // Top-level (unchanged) defaults still apply.
         expect(cfg.provider).toBe('anthropic-agent-sdk');
-        expect(cfg.model).toBe(DEFAULT_MODEL);
+        expect(DEFAULT_MODEL).toBe('haiku');
+        expect(cfg.model).toBe('haiku');
         expect(cfg.cacheDir).toBe('.stryker-llm-cache');
 
         // OpenAI-compatible provider knobs: real OpenAI root, json-mode on, no pricing.

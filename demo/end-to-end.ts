@@ -28,8 +28,8 @@
  *                                               # way to force the subscription path
  *     bun run demo/end-to-end.ts --live
  *
- * With `--live` the demo constructs an `AnthropicAgentProvider` (model
- * `claude-haiku-4-5`) which makes ONE real network call inside `propose`. Costs
+ * With `--live` the demo constructs an `AnthropicAgentProvider` (model alias
+ * `haiku`) which makes ONE real network call inside `propose`. Costs
  * for that call are summed and printed. Without `--live` (the default), nothing
  * touches the network.
  *

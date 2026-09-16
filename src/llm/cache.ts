@@ -25,7 +25,11 @@ import { dirname, join } from 'node:path';
  * output, so it must change the key.
  */
 export interface CacheKeyParts {
-    /** The model id that will serve the call (e.g. `claude-haiku-4-5`). */
+    /**
+     * The requested model id or alias (e.g. `haiku`). The exact requested string
+     * enters the key, so an alias keeps hitting its existing cache entries even
+     * when the provider later resolves fresh requests to a newer model snapshot.
+     */
     model: string;
     /** The fully-rendered prompt string. */
     prompt: string;

@@ -1,7 +1,7 @@
 @hughescr/stryker-llm-mutator
 =============================
 
-Extra, more semantically interesting mutants for [Stryker](https://stryker-mutator.io/) — a set of 7 deterministic **heuristic** operators plus an optional **dynamic‑LLM** pre‑pass (default model **`claude-haiku-4-5`**) — that you wire into your `stryker.conf.mjs` and then run with **stock `stryker run`**. No separate runner.
+Extra, more semantically interesting mutants for [Stryker](https://stryker-mutator.io/) — a set of 7 deterministic **heuristic** operators plus an optional **dynamic‑LLM** pre‑pass (default model alias **`haiku`**) — that you wire into your `stryker.conf.mjs` and then run with **stock `stryker run`**. No separate runner.
 
 > **What this is, honestly.** Stryker v9 has **no public "Mutator" plugin kind** — the operator set is hardcoded inside its instrumenter. This package is therefore **not a sanctioned plugin**: it is a **monkeypatch** that pushes custom `NodeMutator`s into the instrumenter's mutable, module‑level `allMutators` array (resolved at runtime against *your* hoisted instrumenter instance), then lets **stock Stryker** do all the rest — sandboxing, perTest coverage, concurrency, checkers, incremental mode, and every reporter. Our mutants show up in your normal Stryker report, tagged by `mutatorName` (bare PascalCase for heuristics, e.g. `NumberLiteralValue`; `llm` for dynamic‑LLM). It also ships a real `PluginKind.Reporter` plugin (`llm-mutator`) for a survivor + cost view. Use at your own risk — and read [Limitations](#limitations-read-before-adopting) first. Architecture detail lives in [docs/functional-architecture.md](./docs/functional-architecture.md).
 
@@ -78,7 +78,7 @@ export default await withLlmMutators({
             // parallelBatches: 4,         // Haiku requests per wave; >1 speeds cold runs (see caveats)
         },
         provider: 'anthropic-agent-sdk',   // see Authentication below
-        model:    'claude-haiku-4-5',      // default
+        model:    'haiku',                 // default Anthropic alias
         cacheDir: '.stryker-llm-cache',    // commit/restore for warm, free CI
     },
 });
@@ -143,8 +143,10 @@ Everything lives under `llmMutator`. Both switches default such that an empty `l
 | `dynamicLLM.budget.maxCostUsd` | `5` | **Hard** dollar abort, checked between calls. |
 | `dynamicLLM.parallelBatches` | `1` | Number of Haiku requests issued concurrently per wave; >1 speeds cold runs (see caveats). |
 | `provider` | `anthropic-agent-sdk` | LLM provider (only `anthropic-agent-sdk` + `mock` implemented today). |
-| `model` | `claude-haiku-4-5` | Model id. |
+| `model` | `haiku` | Model id or alias. |
 | `cacheDir` | `.stryker-llm-cache` | Content‑addressed cache. Commit/restore it for warm, free CI runs. |
+
+`haiku` follows Anthropic's current Haiku alias for fresh requests. The cache key records the requested alias, so existing cached responses remain reusable if that alias later resolves to a newer model snapshot; clear the cache or set a different explicit model when you want to force fresh responses.
 
 **On `dynamicLLM.parallelBatches`.** Default `1` is the original strictly sequential pre‑pass. Raising it slices the EV‑ranked targets into consecutive waves of that size and fires a whole wave of Haiku `propose()` calls at once, which overlaps the model round‑trips and speeds up **cold** (cache‑miss) runs. Honest, bounded tradeoffs: the hard `maxCostUsd`/`maxLlmCallsPerRun` ceilings can **overshoot by up to `parallelBatches − 1` calls** (that many may be in flight when a ceiling trips — they're only checked between calls), the diminishing‑returns stop is evaluated **per wave** so it may run up to `parallelBatches − 1` calls past the sequential stop point, and very high values may hit the provider's **API rate limits**. There is no hard maximum — pick a value your quota tolerates.
 
@@ -170,7 +172,7 @@ Limitations (read before adopting)
 LLM provider plan
 -----------------
 
-The plugin codes against a single `LLMProvider` abstraction ("given a prompt and a JSON schema, return a validated object"), so the backend is pluggable. The first implemented provider is the Anthropic **Agent SDK** subscription path (`@anthropic-ai/claude-agent-sdk`, default model `claude-haiku-4-5`, auth `CLAUDE_CODE_OAUTH_TOKEN`). A raw per‑user Anthropic **API‑key** path and OpenAI(‑compatible) providers implement the same interface and are planned (they currently throw `NotImplementedError`). Offline tests never touch the network — they inject a mock provider returning canned schema‑valid objects. See [docs/development-plan.md](./docs/development-plan.md) §4.1 / §6.
+The plugin codes against a single `LLMProvider` abstraction ("given a prompt and a JSON schema, return a validated object"), so the backend is pluggable. The first implemented provider is the Anthropic **Agent SDK** subscription path (`@anthropic-ai/claude-agent-sdk`, default model alias `haiku`, auth `CLAUDE_CODE_OAUTH_TOKEN`). A raw per‑user Anthropic **API‑key** path and OpenAI(‑compatible) providers implement the same interface and are planned (they currently throw `NotImplementedError`). Offline tests never touch the network — they inject a mock provider returning canned schema‑valid objects. See [docs/development-plan.md](./docs/development-plan.md) §4.1 / §6.
 
 In production, the Agent SDK provider uses the SDK's multi-turn **`json_schema` structured-output mode** and disables extended thinking. The SDK receives the caller's exact schema as `outputFormat`, validates the emitted object, and can re-prompt on mismatch; disabling extended thinking avoids unnecessary reasoning latency for the mechanical propose task. Prompt-and-parse remains an internal benchmark option rather than the production default.
 

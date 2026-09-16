@@ -35,7 +35,7 @@
  *   `AnthropicAgentProvider` uses for its `json_schema` path WITH isolation +
  *   connectors-off on (its production configuration): the resolved subscription
  *   auth env (via the provider's exported `resolveAuthEnv`, so ANTHROPIC_API_KEY
- *   cannot shadow the OAuth token), `model: DEFAULT_MODEL` (`claude-haiku-4-5`),
+ *   cannot shadow the OAuth token), `model: DEFAULT_MODEL` (`haiku`),
  *   `outputFormat: { type: 'json_schema', schema }`, the by-name tool ban,
  *   `maxTurns: 6`, `permissionMode: 'dontAsk'`, the system prompt via
  *   `systemPrompt`, and the isolation block `settingSources: [] / mcpServers: {} /

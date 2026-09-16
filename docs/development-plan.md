@@ -188,7 +188,7 @@ validated structured output.
 
 **Critical structural implication:** the **first** provider is the Anthropic
 **subscription path via the Agent SDK** (`@anthropic-ai/claude-agent-sdk`),
-driving **`claude-haiku-4-5`**, authenticated with `CLAUDE_CODE_OAUTH_TOKEN`.
+driving the **`haiku`** model alias, authenticated with `CLAUDE_CODE_OAUTH_TOKEN`.
 The Agent SDK is **agentic** — it runs an internal tool/loop, not necessarily a
 single request→response round-trip. Therefore the abstraction **must not assume
 a single round-trip**: its contract is "prompt + schema in, validated object
@@ -273,7 +273,7 @@ else is **offline-testable** with the mocked provider.
 | Phase | Work | Network? | Gate / output |
 |---|---|---|---|
 | **0 — Seam proof** | One **hardcoded** mutant via out-of-band `createInstrumenter().instrument()` + public `TestRunner` + bun-runner, scored on a tiny fixture. CI smoke test: switch-in-source **and** record-in-manifest. | Offline | Mutant appears killed/survived in the standard report → seam is real. **If this fails, stop and reassess** — the whole runtime half is in question. |
-| **1 — LLM client** | Implement the provider abstraction (§4.1) + the Anthropic Agent SDK / subscription provider (`claude-haiku-4-5`, `CLAUDE_CODE_OAUTH_TOKEN`). Schema-validated structured output, content-addressed cache, cost logging. Mockable by construction. | **Live (human)** for the real-call smoke test; offline for all unit tests (mock provider) | A prompt+schema returns a validated object; cache + cost logging work. |
+| **1 — LLM client** | Implement the provider abstraction (§4.1) + the Anthropic Agent SDK / subscription provider (`haiku`, `CLAUDE_CODE_OAUTH_TOKEN`). Schema-validated structured output, content-addressed cache, cost logging. Mockable by construction. | **Live (human)** for the real-call smoke test; offline for all unit tests (mock provider) | A prompt+schema returns a validated object; cache + cost logging work. |
 | **2 — Stage-2 vertical slice** | Feed a hand-picked function → schema-valid replacements → Phase-0 seam → real LLM mutants scored by the runner. No risk targeting, no stage-3 yet. | **Live (human)** end-to-end; offline with mock | **First shippable vertical slice:** real LLM mutants appear in the report. |
 | **3 — Deterministic filters** | `||` Parse-check, `replacement === original` reject, dedup, optional TCE-minify equivalence drop — all **no LLM**. | Offline | Measurably cuts the non-compile/duplicate tax before more LLM spend. |
 | **4 — Stage-1 risk targeting** | `||` Branch/nesting/coverage-gap scoring + budget caps to pick spans, replacing hand-picked functions. **No LLM.** | Offline | Spans chosen automatically under budget. |
@@ -291,7 +291,7 @@ All providers sit behind the single abstraction in §4.1 — "prompt + schema in
 validated object out." Order of implementation:
 
 1. **Anthropic subscription via Agent SDK (FIRST).**
-   `@anthropic-ai/claude-agent-sdk`, `claude-haiku-4-5`, authed with
+   `@anthropic-ai/claude-agent-sdk`, the `haiku` model alias, authed with
    `CLAUDE_CODE_OAUTH_TOKEN`. Agentic (multi-turn-capable). Dev/author use —
    see the ToS caveat in §7.
 2. **Raw Anthropic API key.** Straight one-shot completion with a per-user
