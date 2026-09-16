@@ -23,6 +23,9 @@ const config = {
         '**',
         '!src/**/*.ts',
         '!tests/**/*.ts',
+        // The config-reader tests read .json/.mjs config fixtures at runtime; without
+        // these in the sandbox the dry run fails before any mutant executes.
+        '!tests/**/fixtures/**',
         '!bunfig.toml',
         '!tsconfig.json',
         '!*.mjs',
