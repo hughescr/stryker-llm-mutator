@@ -326,7 +326,7 @@ function alignDropReasonText(reason: AlignDropReason, original: string): string 
     const snippet = clipSnippet(original);
     switch (reason) {
         case 'not-found':
-            return `original \`${snippet}\` not found verbatim in the enclosing function`;
+            return `original \`${snippet}\` not found (verbatim or by AST shape) in the enclosing function`;
         case 'ambiguous':
             return `original \`${snippet}\` appears more than once in the function (ambiguous)`;
         case 'non-node-aligned':

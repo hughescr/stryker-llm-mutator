@@ -1,9 +1,14 @@
-import { describe, expect, it } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
+import { CostAccumulator, MockProvider, ResponseCache } from '../../src/llm/index';
 import type { LLMProvider, ProviderRequest, ProviderResult } from '../../src/llm/types';
 import type { SourceRange } from '../../src/seam/types';
 
 import {
+    createBudgetedProvider,
     PROPOSE_MUTATOR_PREFIX,
     propose,
     proposeCacheIdentity,
@@ -291,7 +296,7 @@ describe('propose — node-alignment drop conditions', () => {
 
         expect(replacements).toHaveLength(0);
         expect(dropped).toHaveLength(1);
-        expect(dropped[0]?.reason).toContain('not found verbatim');
+        expect(dropped[0]?.reason).toContain('not found (verbatim or by AST shape)');
         // The reason interpolates the ACTUAL sub-expression, not the word "original".
         expect(dropped[0]?.reason).toContain('x + y');
         expect(dropped[0]?.fileName).toBe('src/calc.ts');
@@ -394,7 +399,7 @@ describe('propose — node-alignment drop conditions', () => {
         expect(replacements).toHaveLength(1);
         expect(replacements[0]?.mutatorName).toBe(`${PROPOSE_MUTATOR_PREFIX}/ok`);
         expect(dropped).toHaveLength(1);
-        expect(dropped[0]?.reason).toContain('not found verbatim');
+        expect(dropped[0]?.reason).toContain('not found (verbatim or by AST shape)');
     });
 
     it('tallies dropCounts by TYPED reason and never echoes the literal word "original"', async () => {
@@ -570,5 +575,142 @@ describe('propose — comment-stripped prompt + cache identity', () => {
             fingerprint: anonymous.meta.fingerprint,
             fileName: 'src/calc.ts',
         });
+    });
+});
+
+/*
+ * END-TO-END REPLAY. A fingerprint-keyed cache HIT must preserve the mutant set
+ * it promises: the cached candidate's `original` was spelled against the OLD
+ * function text, so after a whitespace / quote / paren / comment edit the
+ * verbatim substring is gone and the candidate must be re-found STRUCTURALLY
+ * (range-align's shape fallback), yielding the CURRENT text + range. Real
+ * `ResponseCache` + budgeted provider + `propose()` — no network.
+ */
+describe('propose — cached candidates replay across formatting-only edits', () => {
+    let dir: string;
+    let cache: ResponseCache;
+
+    beforeEach(async () => {
+        dir = await mkdtemp(join(tmpdir(), 'stryker-llm-propose-replay-'));
+        cache = new ResponseCache(dir);
+    });
+
+    afterEach(async () => {
+        await rm(dir, { recursive: true, force: true });
+    });
+
+    /** A single-function target whose file IS the function. */
+    function fnTarget(source: string): ProposeTarget {
+        return {
+            fileName: '/abs/replay.ts',
+            range: { start: { line: 0, column: 0 }, end: { line: 2, column: 1 } },
+            spanText: source,
+            fileContent: source,
+            spanStartOffset: 0,
+            spanEndOffset: source.length,
+        };
+    }
+
+    /** Buy the proposals for `source` once (paid), returning the inner provider. */
+    async function buy(source: string, candidates: unknown[]): Promise<MockProvider> {
+        const inner = new MockProvider({ responder: () => ({ candidates }), costUsd: 0.1 });
+        const provider = createBudgetedProvider(inner, {
+            cache,
+            cost: new CostAccumulator(),
+            maxCostUsd: 5,
+            maxLlmCallsPerRun: 5,
+            defaultModel: 'haiku',
+        });
+        const target = fnTarget(source);
+        const identity = proposeCacheIdentity(target, 'haiku', 8);
+        const bought = await propose(provider, target, {
+            model: 'haiku',
+            cacheKey: identity.cacheKey,
+            cacheMeta: identity.meta,
+        });
+        expect(bought.cached).toBe(false);
+        expect(bought.replacements).toHaveLength(candidates.length);
+        return inner;
+    }
+
+    /** Replay `source` against the cache (must be a HIT), returning the result. */
+    async function replay(inner: MockProvider, source: string) {
+        const provider = createBudgetedProvider(inner, {
+            cache,
+            cost: new CostAccumulator(),
+            maxCostUsd: 5,
+            maxLlmCallsPerRun: 5,
+            defaultModel: 'haiku',
+        });
+        const target = fnTarget(source);
+        const identity = proposeCacheIdentity(target, 'haiku', 8);
+        const result = await propose(provider, target, {
+            model: 'haiku',
+            cacheKey: identity.cacheKey,
+            cacheMeta: identity.meta,
+        });
+        expect(result.cached).toBe(true);
+        expect(inner.calls).toHaveLength(1);
+        return result;
+    }
+
+    const ORIGINAL = 'function f(a) { return a + 1; }';
+    const INC = { original: 'a + 1', replacement: 'a - 1', mutatorTag: 'dec', rationale: 'r' };
+
+    it('a whitespace-only edit keeps the purchased mutant (current text + range)', async () => {
+        const inner = await buy(ORIGINAL, [INC]);
+        const result = await replay(inner, 'function f(a) {\n    return a+1;\n}');
+        expect(result.dropped).toEqual([]);
+        expect(result.replacements).toHaveLength(1);
+        expect(result.replacements[0]?.original).toBe('a+1');
+        expect(result.replacements[0]?.replacement).toBe('a - 1');
+        expect(result.replacements[0]?.range).toEqual({
+            start: { line: 1, column: 11 },
+            end: { line: 1, column: 14 },
+        });
+    });
+
+    it('an inline-comment edit keeps the purchased mutant', async () => {
+        const inner = await buy(ORIGINAL, [INC]);
+        const result = await replay(inner, 'function f(a) { return a + /* inc */ 1; }');
+        expect(result.dropCounts).toEqual({});
+        expect(result.replacements.map(r => r.original)).toEqual(['a + /* inc */ 1']);
+    });
+
+    it('a quote-style edit keeps the purchased mutant', async () => {
+        const src = "function g(s) { return s === 'x'; }";
+        const inner = await buy(src, [
+            { original: "s === 'x'", replacement: "s !== 'x'", mutatorTag: 'neg', rationale: 'r' },
+        ]);
+        const result = await replay(inner, 'function g(s) { return s === "x"; }');
+        expect(result.replacements.map(r => r.original)).toEqual(['s === "x"']);
+    });
+
+    it('a parenthesis edit keeps the purchased mutant', async () => {
+        const src = 'function h(a, b) { return a + b * 2; }';
+        const inner = await buy(src, [
+            { original: 'b * 2', replacement: 'b / 2', mutatorTag: 'op', rationale: 'r' },
+        ]);
+        const result = await replay(inner, 'function h(a, b) { return a + (b * 2); }');
+        expect(result.replacements.map(r => r.original)).toEqual(['b * 2']);
+        const result2 = await replay(inner, 'function h(a, b) { return (a + ((b) * 2)); }');
+        expect(result2.replacements.map(r => r.original)).toEqual(['(b) * 2']);
+    });
+
+    it('a replayed candidate whose expression now occurs twice is still dropped as ambiguous', async () => {
+        const inner = await buy(ORIGINAL, [INC]);
+        // A function with two `a+1` nodes has a different fingerprint, so seed
+        // its entry directly with the same cached candidate.
+        const twice = 'function f(a) { return (a+1) * (a+1); }';
+        const target = fnTarget(twice);
+        const identity = proposeCacheIdentity(target, 'haiku', 8);
+        await cache.set(identity.cacheKey, {
+            value: { candidates: [INC] },
+            costUsd: 0.1,
+            model: 'haiku',
+        });
+        const result = await replay(inner, twice);
+        expect(result.replacements).toEqual([]);
+        expect(result.dropCounts).toEqual({ ambiguous: 1 });
     });
 });

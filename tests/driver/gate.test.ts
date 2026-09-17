@@ -370,5 +370,66 @@ function classify(items, threshold) {
                 expect(result.costSnapshot.totalUsd).toBe(0);
             });
         });
+
+        it('a paid stop on a higher-EV new function never skips the cached one ranked below it', async () => {
+            // `classifyC` out-ranks `classify` by EV. Its paid call yields nothing
+            // and window=1 / floor=1 trips diminishing returns at once; the cached
+            // `classify` (lower EV) must still be replayed — free replay is not
+            // subject to paid stopping rules.
+            const RICHER_FN = `
+function classifyC(items, threshold, limit) {
+    let count = 0;
+    for (let i = 0; i < items.length - 1; i++) {
+        if (items[i] > threshold && items[i + 1] <= threshold) {
+            count = count + 1;
+        }
+        if (count > limit || items[i] % 2 === 0) {
+            count = Math.max(count - 1, 0);
+        }
+    }
+    return { count: count, ok: count >= 2 && count <= limit * 2 };
+}
+`;
+            await withTempCache(async cache => {
+                const cfg = config({
+                    provider: 'mock',
+                    model: 'haiku',
+                    dynamicLLM: {
+                        enabled: true,
+                        diminishingReturns: { window: 1, minYieldPerCall: 1 },
+                    },
+                });
+                await seedClassify(cache, cfg);
+                const cost = new CostAccumulator();
+                const inner = new MockProvider({
+                    responder: () => ({ candidates: [] }),
+                    costUsd: 0.02,
+                });
+                const provider = createBudgetedProvider(inner, {
+                    cache,
+                    cost,
+                    maxCostUsd: 5,
+                    maxLlmCallsPerRun: 5,
+                    defaultModel: 'haiku',
+                });
+                const lines: string[] = [];
+
+                const result = await buildLlmMutator(cfg, {
+                    provider,
+                    costAccumulator: cost,
+                    files: [
+                        { fileName: '/abs/classify.ts', content: RICH_FN },
+                        { fileName: '/abs/classify-c.ts', content: RICHER_FN },
+                    ],
+                    cwd: '/abs',
+                    cache,
+                    log: l => lines.push(l),
+                });
+
+                expect(lines.some(l => l.includes('stop=diminishing-returns'))).toBe(true);
+                expect(inner.calls).toHaveLength(1);
+                expect([...result.map.keys()]).toEqual(['/abs/classify.ts']);
+            });
+        });
     });
 });

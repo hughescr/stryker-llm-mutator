@@ -123,6 +123,107 @@ describe('alignCandidateRange — robustness', () => {
 });
 
 /*
+ * STRUCTURAL FALLBACK. The response cache is keyed by the function's structural
+ * fingerprint, so a whitespace / quote / paren / comment edit still HITS — but
+ * the cached candidate's `original` was spelled against the OLD text. When the
+ * verbatim substring is absent, the sub-expression is re-found by AST SHAPE
+ * (`fingerprint.ts` `expressionShape` / `nodeShape`) inside the function, and
+ * the CURRENT source text + range are emitted. Ambiguity (two nodes of that
+ * shape) still drops, and a verbatim hit still wins.
+ */
+describe('alignCandidateRange — structural fallback (respelled source)', () => {
+    it('re-finds a sub-expression after a whitespace-only edit and emits the CURRENT text', () => {
+        const fn = 'function f(a) {\n    return a+1;\n}';
+        const ok = expectSuccess(alignCandidateRange(fn, 0, fn.length, 'a + 1'));
+        expect(ok.original).toBe('a+1');
+        expect(ok.range).toEqual({ start: { line: 1, column: 11 }, end: { line: 1, column: 14 } });
+    });
+
+    it('re-finds a sub-expression whose source now carries an inline comment', () => {
+        const fn = 'function f(a) {\n    return a + /* one */ 1;\n}';
+        const ok = expectSuccess(alignCandidateRange(fn, 0, fn.length, 'a + 1'));
+        expect(ok.original).toBe('a + /* one */ 1');
+    });
+
+    it('re-finds a string literal after a quote-style edit', () => {
+        const fn = "function f(s) {\n    return s === 'hi';\n}";
+        const ok = expectSuccess(alignCandidateRange(fn, 0, fn.length, 's === "hi"'));
+        expect(ok.original).toBe("s === 'hi'");
+    });
+
+    it('re-finds an expression after redundant parentheses were added or removed', () => {
+        const added = 'function f(a, b) {\n    return (a + b) * 2;\n}';
+        expect(expectSuccess(alignCandidateRange(added, 0, added.length, 'a + b')).original).toBe(
+            'a + b',
+        );
+        const removed = 'function f(a, b) {\n    return a * 2;\n}';
+        expect(
+            expectSuccess(alignCandidateRange(removed, 0, removed.length, '(a * 2)')).original,
+        ).toBe('a * 2');
+    });
+
+    it('re-finds a sub-expression that reads a private field of its class', () => {
+        const priv = 'class C {\n    #n = 1;\n    f() {\n        return this.#n+1;\n    }\n}';
+        const start = priv.indexOf('f()');
+        const end = priv.lastIndexOf('}');
+        expect(expectSuccess(alignCandidateRange(priv, start, end, 'this.#n + 1')).original).toBe(
+            'this.#n+1',
+        );
+    });
+
+    it('still drops ambiguous when the shape occurs twice (even if spelled differently)', () => {
+        const fn = 'function f(a) {\n    return a+1 + (a + 1);\n}';
+        // Verbatim `a + 1` is found ONCE (inside the parens) — the verbatim path
+        // wins and aligns there; a needle absent verbatim but present twice by
+        // shape is ambiguous.
+        expect(expectSuccess(alignCandidateRange(fn, 0, fn.length, 'a + 1')).range.start).toEqual({
+            line: 1,
+            column: 18,
+        });
+        expect(alignCandidateRange(fn, 0, fn.length, 'a  +  1')).toEqual({
+            dropped: true,
+            reason: 'ambiguous',
+        });
+    });
+
+    it('keeps the verbatim occurrence over a differently-spelled structural twin', () => {
+        const fn = 'function f(a) {\n    const x = a+1;\n    return a + 1;\n}';
+        const ok = expectSuccess(alignCandidateRange(fn, 0, fn.length, 'a + 1'));
+        expect(ok.range.start).toEqual({ line: 2, column: 11 });
+    });
+
+    it('drops not-found when the needle is not an expression or has no structural twin', () => {
+        expect(alignCandidateRange(IS_AFTERNOON, 0, IS_AFTERNOON.length, 'hour  >  13')).toEqual({
+            dropped: true,
+            reason: 'not-found',
+        });
+        expect(alignCandidateRange(IS_AFTERNOON, 0, IS_AFTERNOON.length, 'hour >= ;')).toEqual({
+            dropped: true,
+            reason: 'not-found',
+        });
+    });
+
+    it('scopes the structural search to the function offsets', () => {
+        const file =
+            'const early = hour>=12;\nfunction isAfternoon(hour) {\n    return hour>=12;\n}';
+        const fnStart = file.indexOf('function');
+        const ok = expectSuccess(alignCandidateRange(file, fnStart, file.length, 'hour >= 12'));
+        expect(ok.range.start).toEqual({ line: 2, column: 11 });
+    });
+
+    it('still applies the placement gates to a structurally re-found node', () => {
+        // A method key re-found by shape is still not expression-placeable.
+        const file = 'export class R {\n    dispatch(a) { return a; }\n}';
+        const start = file.indexOf('dispatch');
+        const end = file.lastIndexOf('}') - 1;
+        expect(alignCandidateRange(file, start, end, '(dispatch)')).toEqual({
+            dropped: true,
+            reason: 'not-expression-placeable',
+        });
+    });
+});
+
+/*
  * THE isambard `export class` CRASH (review-handler.ts:21). `@babel/types`'
  * `isExpression()` is a NODE-TYPE check, so an Identifier always passes — but
  * Stryker's expression placer uses babel-traverse's virtual `path.isExpression()`,

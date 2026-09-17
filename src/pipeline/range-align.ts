@@ -23,9 +23,11 @@
  *
  * THE FIVE DROP REASONS (a candidate that fails any of these is dropped-and-
  * logged, NOT emitted — Stryker would reject it at an expression position anyway):
- *   • 'not-found'         — `original` does not appear in the function's source;
- *   • 'ambiguous'         — `original` appears MORE THAN ONCE in the function (we
- *                           cannot pick which occurrence the model meant);
+ *   • 'not-found'         — `original` appears in the function's source neither
+ *                           verbatim nor by AST shape (see STRUCTURAL FALLBACK);
+ *   • 'ambiguous'         — `original` appears MORE THAN ONCE in the function,
+ *                           verbatim or by shape (we cannot pick which occurrence
+ *                           the model meant);
  *   • 'non-node-aligned'  — no AST node's span EXACTLY equals the located
  *                           substring (it crosses node boundaries / is a partial);
  *   • 'not-an-expression' — the exactly-aligned node is a Statement (or other
@@ -61,6 +63,22 @@
  * range is the node's babel `loc` run through `toStrykerRange` (1-based line − 1,
  * columns unchanged) — IDENTICAL to targeting's convention, so it flows cleanly
  * onto `Replacement.range` and the map-builder's `+1` keying round-trips.
+ *
+ * STRUCTURAL FALLBACK (respelled source). The response cache is keyed by the
+ * function's structural FINGERPRINT (`fingerprint.ts`), so a whitespace / quote /
+ * paren / inline-comment edit still HITS — but the cached candidate's `original`
+ * was spelled against the OLD text and its verbatim substring may be gone
+ * (`a + 1` after the source became `a+1`). Dropping it as `not-found` would
+ * silently discard a mutant the hit promised. So when the verbatim search finds
+ * NOTHING, the candidate is re-found by AST SHAPE: `original` is parsed as an
+ * expression and canonicalized exactly as the fingerprint is
+ * (`expressionShape`), every node inside the function is canonicalized the same
+ * way (`nodeShape`), and a SINGLE equal-shape node is the match — its CURRENT
+ * source text becomes `original` and its span the range. Two equal-shape nodes
+ * are `ambiguous` (the same safeguard as two verbatim occurrences); none, or an
+ * `original` that is not a single expression, stays `not-found`. A verbatim hit
+ * always wins over a structural one (it is what the model literally wrote),
+ * and the placement gates (d)/(e) below apply to a structural match unchanged.
  */
 
 import { parse } from '@babel/parser';
@@ -79,6 +97,7 @@ import {
 } from '@babel/types';
 
 import { type AnyNode, BABEL_PLUGINS, childNodes, toStrykerRange } from './babel-walk';
+import { expressionShape, nodeShape } from './fingerprint';
 import type { SourceRange } from '../seam/types';
 
 /** A node carrying a non-null `loc` — the shape `toStrykerRange` consumes. */
@@ -101,7 +120,11 @@ export type AlignDropReason =
 interface AlignSuccess {
     /** The exactly-aligned EXPRESSION node's 0-based Stryker range. */
     range: SourceRange;
-    /** The verbatim sub-expression source (flows onto `Replacement.original`). */
+    /**
+     * The sub-expression's CURRENT source text (flows onto `Replacement.original`):
+     * the candidate's own spelling on a verbatim match, the node's source on a
+     * structural one.
+     */
     original: string;
 }
 
@@ -152,6 +175,14 @@ interface SpanMatch {
     ancestors: readonly AnyNode[];
 }
 
+/** A node's numeric `[start, end)` offsets (a missing offset reads as -∞, matching nothing). */
+function offsetsOf(node: AnyNode): { start: number; end: number } {
+    return {
+        start: (node as { start?: number | null }).start ?? Number.NEGATIVE_INFINITY,
+        end: (node as { end?: number | null }).end ?? Number.NEGATIVE_INFINITY,
+    };
+}
+
 /**
  * Walk the parsed file's AST for the node whose source span `[node.start,
  * node.end)` EXACTLY equals `[absStart, absEnd)`. Returns the deepest such node
@@ -171,8 +202,7 @@ function findExactSpanNode(root: AnyNode, absStart: number, absEnd: number): Spa
     // first; snapshotted (reversed, so parent-first) when a match is recorded.
     const lineage: AnyNode[] = [];
     const visit = (node: AnyNode): void => {
-        const start = (node as { start?: number | null }).start ?? Number.NEGATIVE_INFINITY;
-        const end = (node as { end?: number | null }).end ?? Number.NEGATIVE_INFINITY;
+        const { start, end } = offsetsOf(node);
         if (start === absStart && end === absEnd && hasLoc(node)) {
             match = { node, ancestors: [...lineage].reverse() };
         }
@@ -188,6 +218,42 @@ function findExactSpanNode(root: AnyNode, absStart: number, absEnd: number): Spa
     };
     visit(root);
     return match;
+}
+
+/**
+ * Walk the parsed file's AST for every node INSIDE the function `[fnStart,
+ * fnEnd)` whose canonical shape equals `shape` (see the STRUCTURAL FALLBACK
+ * note in the module header). Each hit carries its ancestor chain, parent first,
+ * so it can be placement-checked exactly like an exact-span match. Only nodes
+ * lying wholly inside the function are compared, and a matched node's children
+ * are not descended into (a shape cannot equal a shape strictly inside it).
+ */
+function findShapeMatches(
+    root: AnyNode,
+    fnStart: number,
+    fnEnd: number,
+    shape: string,
+): SpanMatch[] {
+    const matches: SpanMatch[] = [];
+    const lineage: AnyNode[] = [];
+    const visit = (node: AnyNode): void => {
+        const { start, end } = offsetsOf(node);
+        // Nothing inside this node can lie inside the function if it does not overlap it.
+        if (end <= fnStart || start >= fnEnd) {
+            return;
+        }
+        if (start >= fnStart && end <= fnEnd && hasLoc(node) && nodeShape(node) === shape) {
+            matches.push({ node, ancestors: [...lineage].reverse() });
+            return;
+        }
+        lineage.push(node);
+        for (const child of childNodes(node)) {
+            visit(child);
+        }
+        lineage.pop();
+    };
+    visit(root);
+    return matches;
 }
 
 /** Mirror of the expression placer's `isMemberExpression(path)` (plain or optional). */
@@ -281,17 +347,74 @@ function findExpressionPlacement(match: SpanMatch): boolean {
     return placedAsExpression;
 }
 
+/** Parse the full file the way the instrumenter does and return its `Program` root. */
+function parseProgram(fileContent: string): AnyNode {
+    const ast = parse(fileContent, {
+        sourceType: 'module',
+        plugins: [...BABEL_PLUGINS],
+        errorRecovery: false,
+    });
+    return ast.program as unknown as AnyNode;
+}
+
 /**
- * Derive a candidate's true {@link SourceRange} + verbatim `original` by locating
- * its sub-expression inside the enclosing function and node-aligning it. NEVER
- * trusts LLM coordinates — the range comes from OUR OWN parse.
+ * Steps (a)–(c): find the node a candidate's `original` denotes inside the
+ * function — by VERBATIM substring first (an exact-span node at its single
+ * occurrence), else by STRUCTURE (the single node of equal canonical shape; see
+ * the module header). Returns the match with the `original` text to emit (the
+ * node's CURRENT source on a structural match), or the typed drop.
+ */
+function locateCandidate(
+    fileContent: string,
+    fnStartOffset: number,
+    fnEndOffset: number,
+    original: string,
+): { match: SpanMatch; original: string } | AlignDrop {
+    // (a/b) Locate `original` verbatim inside the function: an ambiguous
+    // substring drops outright; a single occurrence is node-aligned in (c).
+    const located = locateInFunction(fileContent, fnStartOffset, fnEndOffset, original);
+    if (located === 'ambiguous') {
+        return { dropped: true, reason: located };
+    }
+    const program = parseProgram(fileContent);
+
+    if (typeof located === 'number') {
+        // (c) Find the node whose span EXACTLY equals the located substring. No
+        // exact-span node ⇒ non-node-aligned drop.
+        const match = findExactSpanNode(program, located, located + original.length);
+        return match === undefined
+            ? { dropped: true, reason: 'non-node-aligned' }
+            : { match, original };
+    }
+
+    // (c') Not found verbatim: the source may have been respelled since the
+    // candidate was cached. Re-find it by shape; exactly one node must match.
+    const shape = expressionShape(original);
+    const matches =
+        shape === undefined ? [] : findShapeMatches(program, fnStartOffset, fnEndOffset, shape);
+    if (matches.length === 0) {
+        return { dropped: true, reason: 'not-found' };
+    }
+    if (matches.length > 1) {
+        return { dropped: true, reason: 'ambiguous' };
+    }
+    const [match] = matches as [SpanMatch];
+    const { start, end } = offsetsOf(match.node);
+    return { match, original: fileContent.slice(start, end) };
+}
+
+/**
+ * Derive a candidate's true {@link SourceRange} + `original` by locating its
+ * sub-expression inside the enclosing function (verbatim, else structurally) and
+ * node-aligning it. NEVER trusts LLM coordinates — the range comes from OUR OWN
+ * parse.
  *
  * @param fileContent The FULL file source text.
  * @param fnStartOffset The enclosing function's absolute char START offset.
  * @param fnEndOffset The enclosing function's absolute char END offset (exclusive).
- * @param original The candidate's verbatim sub-expression substring.
- * @returns {@link AlignSuccess} with the EXPRESSION node's range, or an
- *   {@link AlignDrop} carrying one of the five drop reasons.
+ * @param original The candidate's sub-expression as the model spelled it.
+ * @returns {@link AlignSuccess} with the EXPRESSION node's range and its CURRENT
+ *   source text, or an {@link AlignDrop} carrying one of the five drop reasons.
  */
 export function alignCandidateRange(
     fileContent: string,
@@ -299,26 +422,11 @@ export function alignCandidateRange(
     fnEndOffset: number,
     original: string,
 ): AlignResult {
-    // (a/b) Locate `original` inside the function: not-found / ambiguous drop.
-    const located = locateInFunction(fileContent, fnStartOffset, fnEndOffset, original);
-    if (typeof located === 'string') {
-        return { dropped: true, reason: located };
+    const located = locateCandidate(fileContent, fnStartOffset, fnEndOffset, original);
+    if ('dropped' in located) {
+        return located;
     }
-    const absStart = located;
-    const absEnd = absStart + original.length;
-
-    // (c) Re-parse the file and find the node whose span EXACTLY equals the
-    // located substring. No exact-span node ⇒ non-node-aligned drop.
-    const ast = parse(fileContent, {
-        sourceType: 'module',
-        plugins: [...BABEL_PLUGINS],
-        errorRecovery: false,
-    });
-    const program = ast.program as unknown as AnyNode;
-    const match = findExactSpanNode(program, absStart, absEnd);
-    if (match === undefined) {
-        return { dropped: true, reason: 'non-node-aligned' };
-    }
+    const { match } = located;
     const { node } = match;
 
     // (d) The aligned node MUST be an EXPRESSION (the expression/ternary placer
@@ -339,5 +447,5 @@ export function alignCandidateRange(
 
     // (f) Success: convert the located node's babel loc to a 0-based Stryker range
     // (the node is a LocatedNode, so `loc` is guaranteed present).
-    return { range: toStrykerRange(node.loc), original };
+    return { range: toStrykerRange(node.loc), original: located.original };
 }

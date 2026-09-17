@@ -52,6 +52,14 @@ export interface RunPrePassDeps {
     log?: PrePassLogger;
     /** Cooperative cancellation signal forwarded to each propose() call. */
     signal?: AbortSignal;
+    /**
+     * The targeting stage's cache probe (`CachedTargetProbe`): true for a target
+     * whose proposals are already cached. Cached targets are FREE, so they are
+     * all replayed first, outside every stopping rule; only the uncached
+     * (paid) targets run under the cost ceiling / call cap / diminishing-returns
+     * stops. Absent ⇒ every target is treated as paid (one queue, legacy).
+     */
+    isCached?: (target: ProposeTarget) => boolean;
 }
 
 /** Why the pre-pass stopped, for logging + the next run's posture. */
@@ -348,24 +356,97 @@ function processProposeResult(
     return undefined;
 }
 
+/** Everything one wave of `propose()` calls needs besides its targets. */
+interface WaveContext {
+    provider: LLMProvider;
+    config: LlmMutatorConfig;
+    signal: AbortSignal | undefined;
+    state: PrePassState;
+    ctx: Parameters<typeof processProposeResult>[3];
+}
+
+/**
+ * Issue ONE wave of `propose()` calls concurrently and fold the settled results
+ * into the shared state IN ARRAY ORDER (deterministic regardless of completion
+ * order). Returns the stop reason a result raised — a diminishing-returns floor
+ * or a {@link BudgetExceededError} — else `undefined`. A stop does NOT skip the
+ * wave's already-completed siblings (they are paid for, and cached); a
+ * non-budget rejection propagates.
+ */
+async function runWave(
+    wave: readonly ProposeTarget[],
+    { provider, config, signal, state, ctx }: WaveContext,
+): Promise<PrePassStopReason | undefined> {
+    const { budget } = config.dynamicLLM;
+    const settled = await Promise.allSettled(
+        wave.map(t => {
+            // Fingerprint-keyed cache identity: the SAME computation the
+            // targeting stage's `isCached` probe uses, so "cached" there means
+            // "hit" here.
+            const { cacheKey, meta } = proposeCacheIdentity(
+                t,
+                config.model,
+                budget.maxCandidatesPerFile,
+            );
+            return propose(provider, t, {
+                maxCandidates: budget.maxCandidatesPerFile,
+                model: config.model,
+                cacheKey,
+                cacheMeta: meta,
+                ...(signal === undefined ? {} : { signal }),
+            });
+        }),
+    );
+    let stopReason: PrePassStopReason | undefined;
+    // `settled` is index-aligned to `wave` by construction.
+    for (const [j, target] of wave.entries()) {
+        const outcome = settled[j];
+        if (outcome === undefined) {
+            continue;
+        }
+        if (outcome.status === 'fulfilled') {
+            stopReason = processProposeResult(outcome.value, target, state, ctx) ?? stopReason;
+            continue;
+        }
+        const error = outcome.reason as unknown;
+        if (error instanceof BudgetExceededError) {
+            stopReason = error.reason === 'maxCostUsd' ? 'cost-ceiling' : 'call-cap';
+            ctx.log?.(`Pre-pass STOP: ${error.message}`);
+            continue;
+        }
+        throw error;
+    }
+    return stopReason;
+}
+
 /**
  * Run the dynamic-LLM pre-pass over the EV-ranked targets. Returns the filtered
  * survivors plus the cost snapshot, drop log, stop reason, and call count.
  *
- * The targets are processed in consecutive WAVES of `dynamicLLM.parallelBatches`
- * (default 1). Within a wave all `propose()` calls are issued CONCURRENTLY via
- * `Promise.allSettled`; the settled results are then processed strictly IN ARRAY
- * ORDER so the survivor set + heartbeat sequence stay deterministic. Waves
- * themselves are sequential: the budgeted provider only checks the ceiling
- * BETWEEN calls and diminishing-returns is evaluated PER WAVE, so a cost/call
- * ceiling may overshoot — and the diminishing-returns stop may run — by up to
- * `parallelBatches - 1` calls. With `parallelBatches === 1` each wave is a single
- * target, making the behavior identical to the original sequential loop.
+ * TWO QUEUES. With an `isCached` probe (`deps.isCached`, the same one targeting
+ * used) the targets are split: every CACHED target is replayed FIRST — free,
+ * instant, and outside every stopping rule, so a paid stop can never skip a
+ * cached function that happened to rank below it — then the UNCACHED (paid)
+ * targets run in EV order under the cost ceiling / call cap / diminishing-returns
+ * stops. A stop raised while replaying (a probe miss that turned out paid) is
+ * honoured before the paid queue starts. Without a probe there is one queue and
+ * every target is treated as paid.
+ *
+ * WAVES. Each queue is processed in consecutive waves of
+ * `dynamicLLM.parallelBatches` (default 1). Within a wave all `propose()` calls
+ * are issued CONCURRENTLY via `Promise.allSettled`; the settled results are then
+ * processed strictly IN ARRAY ORDER so the survivor set + heartbeat sequence
+ * stay deterministic. Waves themselves are sequential: the budgeted provider
+ * only checks the ceiling BETWEEN calls and diminishing-returns is evaluated PER
+ * WAVE, so a cost/call ceiling may overshoot — and the diminishing-returns stop
+ * may run — by up to `parallelBatches - 1` calls. With `parallelBatches === 1`
+ * each wave is a single target, making the behavior identical to a sequential
+ * loop.
  *
  * @param provider The BUDGETED provider (cache + cost + ceiling enforcement).
  * @param targets EV-ranked enclosing-function targets from Gate 1/2.
  * @param config The parsed config (reads `dynamicLLM.budget` + `diminishingReturns` + `parallelBatches`).
- * @param deps Cost accumulator, logger, abort signal.
+ * @param deps Cost accumulator, logger, abort signal, cache probe.
  */
 export async function runPrePass(
     provider: LLMProvider,
@@ -373,8 +454,8 @@ export async function runPrePass(
     config: LlmMutatorConfig,
     deps: RunPrePassDeps,
 ): Promise<RunPrePassResult> {
-    const { cost, log, signal } = deps;
-    const { budget, diminishingReturns, parallelBatches } = config.dynamicLLM;
+    const { cost, log, signal, isCached } = deps;
+    const { diminishingReturns, parallelBatches } = config.dynamicLLM;
 
     const state: PrePassState = {
         survivors: [],
@@ -385,62 +466,29 @@ export async function runPrePass(
         processed: 0,
         callsIssued: 0,
     };
-    const ctx = { total: targets.length, cost, log, diminishingReturns };
+    const wave: WaveContext = {
+        provider,
+        config,
+        signal,
+        state,
+        ctx: { total: targets.length, cost, log, diminishingReturns },
+    };
+
+    const cached = isCached === undefined ? [] : targets.filter(t => isCached(t));
+    const paid = isCached === undefined ? targets : targets.filter(t => !isCached(t));
 
     let stopReason: PrePassStopReason = 'queue-exhausted';
-    let stop = false;
-
-    for (let i = 0; i < targets.length && !stop; i += parallelBatches) {
-        const wave = targets.slice(i, i + parallelBatches);
+    // Free replay: every cached target, no stop rule can end this queue early.
+    for (let i = 0; i < cached.length; i += parallelBatches) {
+        // oxlint-disable-next-line no-await-in-loop -- waves are sequential by design.
+        const reason = await runWave(cached.slice(i, i + parallelBatches), wave);
+        stopReason = reason ?? stopReason;
+    }
+    // Paid queue: halts on the first stop (including one raised during replay).
+    for (let i = 0; i < paid.length && stopReason === 'queue-exhausted'; i += parallelBatches) {
         // oxlint-disable-next-line no-await-in-loop -- waves are sequential by design: ceiling + diminishing-returns are evaluated per wave.
-        const settled = await Promise.allSettled(
-            wave.map(t => {
-                // Fingerprint-keyed cache identity: the SAME computation the
-                // targeting stage's `isCached` probe uses, so "cached" there means
-                // "hit" here.
-                const { cacheKey, meta } = proposeCacheIdentity(
-                    t,
-                    config.model,
-                    budget.maxCandidatesPerFile,
-                );
-                return propose(provider, t, {
-                    maxCandidates: budget.maxCandidatesPerFile,
-                    model: config.model,
-                    cacheKey,
-                    cacheMeta: meta,
-                    ...(signal === undefined ? {} : { signal }),
-                });
-            }),
-        );
-        // Re-pair each settled outcome with its target so processing stays in
-        // ARRAY ORDER without an out-of-band index (settled is index-aligned to
-        // wave by construction). Deterministic regardless of completion order.
-        const results = wave.map((t, j) => ({ target: t, outcome: settled[j] }));
-
-        // Process the wave's results IN ARRAY ORDER (deterministic). A rejection
-        // sets the stop flag but we STILL finish the already-completed siblings —
-        // they are paid for (and cached). A non-budget rejection propagates.
-        for (const { target, outcome } of results) {
-            if (outcome === undefined) {
-                continue;
-            }
-            if (outcome.status === 'fulfilled') {
-                const reason = processProposeResult(outcome.value, target, state, ctx);
-                if (reason !== undefined) {
-                    stopReason = reason;
-                    stop = true;
-                }
-                continue;
-            }
-            const error = outcome.reason as unknown;
-            if (error instanceof BudgetExceededError) {
-                stopReason = error.reason === 'maxCostUsd' ? 'cost-ceiling' : 'call-cap';
-                log?.(`Pre-pass STOP: ${error.message}`);
-                stop = true;
-                continue;
-            }
-            throw error;
-        }
+        const reason = await runWave(paid.slice(i, i + parallelBatches), wave);
+        stopReason = reason ?? stopReason;
     }
 
     return {

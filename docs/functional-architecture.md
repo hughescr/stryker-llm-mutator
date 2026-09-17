@@ -320,9 +320,10 @@ we **do not present a comparable-looking score** (§6, and risks below).
   on cache MISSES. A content-addressed cache (key = `SHA256(model +
   "fp:<function fingerprint>|max:<candidate cap>" + system + stableStringify(schema))`,
   where the fingerprint is a canonical-AST digest of the function — see
-  `src/pipeline/fingerprint.ts`; comments, whitespace, literal spelling, trailing
-  commas and redundant parens do NOT change it, any identifier / literal value /
-  operator / structure edit does) makes a WARM run (every targeted call already cached)
+  `src/pipeline/fingerprint.ts`; comments, whitespace, literal spelling (incl.
+  BigInt prefixes and UNTAGGED template escapes), trailing commas and redundant
+  parens do NOT change it, any identifier / literal value / operator / structure
+  edit — or a TAGGED template's raw text — does) makes a WARM run (every targeted call already cached)
   byte-for-byte reproducible and free: the budgeted provider's cache-hit branch
   reconstructs the identical validated value at `costUsd:0`/`cached:true` and never
   calls the model. So **reproducibility == cache coverage**. For a deterministic,
@@ -407,7 +408,13 @@ proposals are already in the response cache (probed with the same fingerprint ke
 the pre-pass uses) is ALWAYS targeted — a hit is free and instant — so the mutant
 set can only grow run-over-run instead of drifting as EV ranks shuffle functions in
 and out of a fixed window. The call cap and the diminishing-returns window count
-only PAID calls. In frozen mode the uncached candidates are skipped outright.
+only PAID calls, and the pre-pass replays EVERY cached target first — outside the
+stopping rules — before walking the paid queue in EV order, so a paid stop never
+skips a cached function ranked below it. In frozen mode the uncached candidates are
+skipped outright. A hit replays the whole purchased mutant set even after a
+formatting-only edit: a cached candidate's `original` is matched verbatim first,
+then by AST shape (`range-align.ts` structural fallback), and emitted with the
+CURRENT source text + range; two equal-shape nodes still drop as `ambiguous`.
 
 **GATE 2 — COMPLEMENTARITY HAND-OFF (heuristics first).** Heuristics run inside
 Stryker for free (zero LLM spend). The LLM pre-pass is invoked only on

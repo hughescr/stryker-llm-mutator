@@ -303,10 +303,13 @@ export async function buildLlmMutator(
     // The cost accumulator lives inside the budgeted provider; the pre-pass reads
     // its snapshot. We reconstruct a thin accumulator view by letting runPrePass
     // own the snapshot via the same accumulator the budgeted provider records to.
+    // The SAME cache probe targeting used tells the pre-pass which targets are
+    // free, so a paid stop never skips a cached function ranked below it.
     const prePass = await runPrePass(provider, targets, cfg, {
         cost: deps.costAccumulator,
         ...(log === undefined ? {} : { log }),
         ...(signal === undefined ? {} : { signal }),
+        ...(isCached === undefined ? {} : { isCached }),
     });
 
     const { map, dropped } = buildLlmMutatorMap(prePass.survivors, cwd);

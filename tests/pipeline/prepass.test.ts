@@ -195,7 +195,9 @@ describe('runPrePass', () => {
         expect(result.survivors.map(r => r.replacement)).toEqual(['a - 1']);
         // Both alignment drops are accounted in the run drop log (the JSON report),
         // with the ACTUAL sub-expression interpolated (not the literal "original").
-        expect(result.dropped.some(d => d.reason.includes('not found verbatim'))).toBe(true);
+        expect(
+            result.dropped.some(d => d.reason.includes('not found (verbatim or by AST shape)')),
+        ).toBe(true);
         expect(result.dropped.some(d => d.reason.includes('z + 9'))).toBe(true);
         expect(
             result.dropped.some(d => d.reason.includes('aligns to a statement, not an expression')),
@@ -735,5 +737,96 @@ describe('runPrePass — fingerprint-keyed cache + paid-only accounting', () => 
         expect(result.stopReason).toBe('queue-exhausted');
         expect(inner.calls).toHaveLength(1);
         expect(result.survivors.map(r => r.replacement)).toEqual(['r - 1']);
+    });
+
+    /*
+     * A PAID stop (diminishing returns, cost ceiling, call cap) must end the paid
+     * work only: every CACHED target is free and must still be replayed, even
+     * when it sits AFTER the stop in EV order. The `isCached` probe (the same one
+     * targeting uses) tells the pre-pass which targets are free.
+     */
+    describe('mixed cached / uncached queues: a paid stop never skips a cached target', () => {
+        const maxCandidates = cfg().dynamicLLM.budget.maxCandidatesPerFile;
+        const CACHED_FN = 'function ch(q) {\n    return q + 1;\n}';
+
+        /** Seed the cache with one valid candidate for `CACHED_FN` and return its target. */
+        async function seedCached(): Promise<ProposeTarget> {
+            const t = target('/abs/c.ts', 0, CACHED_FN);
+            await cache.set(proposeCacheIdentity(t, 'haiku', maxCandidates).cacheKey, {
+                value: { candidates: [candidate('q - 1', 'dec', 'q + 1')] },
+                costUsd: 0,
+                model: 'haiku',
+            });
+            return t;
+        }
+
+        /** The `isCached` probe: a target is cached when its key is on disk. */
+        async function probe(): Promise<(t: ProposeTarget) => boolean> {
+            const keys = await cache.keys();
+            return t => keys.has(proposeCacheIdentity(t, 'haiku', maxCandidates).cacheKey);
+        }
+
+        it('diminishing returns after a zero-yield paid call still replays the later cached target', async () => {
+            const cached = await seedCached();
+            const inner = new MockProvider({ responder: () => ({ candidates: [] }), costUsd: 0.1 });
+            const uncached = target('/abs/u.ts', 0, 'function un(r) {\n    return r * 2;\n}');
+            const config = cfg({ diminishingReturns: { window: 1, minYieldPerCall: 1 } });
+
+            const result = await runPrePass(budgeted(inner), [uncached, cached], config, {
+                cost,
+                isCached: await probe(),
+            });
+            expect(result.stopReason).toBe('diminishing-returns');
+            expect(result.callsIssued).toBe(1);
+            expect(inner.calls).toHaveLength(1);
+            expect(result.survivors.map(r => r.replacement)).toEqual(['q - 1']);
+        });
+
+        it('a call cap hit by the first paid target still replays the cached targets after it (no network)', async () => {
+            const cached = await seedCached();
+            const inner = new MockProvider({
+                responder: () => ({ candidates: [candidate('r / 2', 'div', 'r * 2')] }),
+                costUsd: 0.1,
+            });
+            const paidA = target('/abs/ua.ts', 0, 'function ua(r) {\n    return r * 2;\n}');
+            const paidB = target('/abs/ub.ts', 0, 'function ub(r) {\n    return r * 2;\n}');
+
+            const result = await runPrePass(
+                budgeted(inner, { maxLlmCallsPerRun: 1 }),
+                [paidA, paidB, cached],
+                cfg(),
+                { cost, isCached: await probe() },
+            );
+            expect(result.stopReason).toBe('call-cap');
+            expect(inner.calls).toHaveLength(1);
+            expect(result.callsIssued).toBe(1);
+            expect(result.survivors.map(r => r.replacement).sort()).toEqual(['q - 1', 'r / 2']);
+        });
+
+        it('a cost ceiling already crossed still replays every cached target', async () => {
+            const cached = await seedCached();
+            const inner = new MockProvider({ responder: () => ({ candidates: [] }), costUsd: 0.1 });
+            const paid = target('/abs/u.ts', 0, 'function un(r) {\n    return r * 2;\n}');
+            cost.add(10); // over the $5 ceiling before the first paid call
+
+            const result = await runPrePass(budgeted(inner), [paid, cached], cfg(), {
+                cost,
+                isCached: await probe(),
+            });
+            expect(result.stopReason).toBe('cost-ceiling');
+            expect(inner.calls).toHaveLength(0);
+            expect(result.survivors.map(r => r.replacement)).toEqual(['q - 1']);
+        });
+
+        it('without an isCached probe the legacy single-queue behaviour stands', async () => {
+            const cached = await seedCached();
+            const inner = new MockProvider({ responder: () => ({ candidates: [] }), costUsd: 0.1 });
+            const uncached = target('/abs/u.ts', 0, 'function un(r) {\n    return r * 2;\n}');
+            const config = cfg({ diminishingReturns: { window: 1, minYieldPerCall: 1 } });
+
+            const result = await runPrePass(budgeted(inner), [uncached, cached], config, { cost });
+            expect(result.stopReason).toBe('diminishing-returns');
+            expect(result.survivors).toEqual([]);
+        });
     });
 });

@@ -61,6 +61,21 @@ describe('functionFingerprint — invariants (same fingerprint)', () => {
         expect(functionFingerprint(escaped)).toBe(functionFingerprint(literal));
     });
 
+    it('ignores BigInt literal spelling (hex / binary / octal / separators) when the value is identical', () => {
+        const spellings = [
+            'function f() { return 0x10n; }',
+            'function f() { return 16n; }',
+            'function f() { return 0b10000n; }',
+            'function f() { return 0o20n; }',
+            'function f() { return 1_6n; }',
+        ];
+        const digests = new Set(spellings.map(functionFingerprint));
+        expect(digests.size).toBe(1);
+        expect(functionFingerprint('function f() { return 17n; }')).not.toBe(
+            functionFingerprint('function f() { return 16n; }'),
+        );
+    });
+
     it('is deterministic across calls', () => {
         expect(functionFingerprint(BASE)).toBe(functionFingerprint(BASE));
     });
@@ -110,6 +125,28 @@ describe('functionFingerprint — sensitivity (different fingerprint)', () => {
         const grouped = `function f(a, b, c) { return (a + b) * c; }`;
         const flat = `function f(a, b, c) { return a + b * c; }`;
         expect(functionFingerprint(grouped)).not.toBe(functionFingerprint(flat));
+    });
+
+    it('keeps a TAGGED template raw spelling (the tag can read strings.raw)', () => {
+        // `String.raw` returns "\\n" (two chars) for the escape and "\n" (one
+        // char) for the literal newline — different behavior, different digest.
+        const escaped = 'function f() { return String.raw`\\n`; }';
+        const newline = 'function f() { return String.raw`\n`; }';
+        expect(functionFingerprint(escaped)).not.toBe(functionFingerprint(newline));
+    });
+
+    it('distinguishes tagged templates whose invalid escapes both cook to null', () => {
+        const u = 'function f() { return tag`\\u`; }';
+        const x = 'function f() { return tag`\\x`; }';
+        expect(functionFingerprint(u)).not.toBe(functionFingerprint(x));
+    });
+
+    it('still ignores raw spelling for an UNTAGGED template nested inside a tagged one', () => {
+        // The `${…}` is source text under test, not an interpolation here.
+        const hole = (inner: string): string => `function f() { return tag\`$\{${inner}}\`; }`;
+        const escaped = hole('`a\\u0041`');
+        const literal = hole('`aA`');
+        expect(functionFingerprint(escaped)).toBe(functionFingerprint(literal));
     });
 });
 
@@ -206,19 +243,51 @@ describe('stripComments', () => {
         expect(stripComments(input)).toBe(`function f(a, b) { return a +  b; }`);
     });
 
-    it('collapses a run of 3+ blank lines (left by whole-line comments) to one', () => {
+    it('removes whole-line comments together with their line (no blank-line residue)', () => {
         const input = `function f() {
     // one
     // two
     // three
     return 1;
 }`;
-        expect(stripComments(input)).toBe(`function f() {\n\n    return 1;\n}`);
+        expect(stripComments(input)).toBe(`function f() {\n    return 1;\n}`);
     });
 
-    it('keeps a run of 2 blank lines untouched', () => {
+    it('removes a whole-line multi-line block comment together with its lines', () => {
+        const input = `function f() {\n    /**\n     * doc\n     */\n    return 1;\n}`;
+        expect(stripComments(input)).toBe(`function f() {\n    return 1;\n}`);
+        // A leading whole-line comment with nothing before it goes the same way.
+        expect(stripComments(`/* head */\nfunction g() { return 2; }`)).toBe(
+            `function g() { return 2; }`,
+        );
+    });
+
+    it('keeps blank-line runs untouched (no global collapse)', () => {
         const input = `function f() {\n\n\n    return 1;\n}`;
         expect(stripComments(input)).toBe(input);
+        // Even when the function also carries a comment elsewhere.
+        const withComment = `function f() {\n\n\n\n    return 1; // c\n}`;
+        expect(stripComments(withComment)).toBe(`function f() {\n\n\n\n    return 1; \n}`);
+    });
+
+    it('keeps tokens separated when a comment is the only thing between them', () => {
+        expect(stripComments('function f(){return/*comment*/1}')).toBe('function f(){return 1}');
+    });
+
+    it('keeps a line terminator inside a comment (ASI-sensitive)', () => {
+        // `return/*\ncomment*/ 1` returns undefined via ASI; the stripped text
+        // must keep a newline after `return` so it still does.
+        expect(stripComments('function f(){return/*\ncomment*/ 1}')).toBe(
+            'function f(){return\n 1}',
+        );
+        expect(stripComments('function f(){return/*\r\nx\r\ny*/ 1}')).toBe(
+            'function f(){return\n\n 1}',
+        );
+    });
+
+    it('never touches the contents of a multi-line template literal', () => {
+        const input = 'function f() {\n    // c\n    return `a\n\n\n\nb`;\n}';
+        expect(stripComments(input)).toBe('function f() {\n    return `a\n\n\n\nb`;\n}');
     });
 
     it('returns comment-free text unchanged', () => {
