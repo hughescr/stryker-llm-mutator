@@ -211,6 +211,59 @@ describe('alignCandidateRange — structural fallback (respelled source)', () =>
         expect(ok.range.start).toEqual({ line: 2, column: 11 });
     });
 
+    it('re-finds by shape when the verbatim text ALSO appears inside a comment (raw ambiguity)', () => {
+        // A comment added inside the function but outside the span repeats the
+        // candidate's text: two raw occurrences, ONE real node. The raw ambiguity
+        // must not block the shape replay.
+        const fn = 'function f(a) {\n    // a + 1 is the offset\n    return a + 1;\n}';
+        const ok = expectSuccess(alignCandidateRange(fn, 0, fn.length, 'a + 1'));
+        expect(ok.original).toBe('a + 1');
+        expect(ok.range).toEqual({ start: { line: 2, column: 11 }, end: { line: 2, column: 16 } });
+        expect(ok.recovered).toBe(true);
+    });
+
+    it('re-finds by shape when the ONLY verbatim occurrence lies inside a comment (non-node-aligned)', () => {
+        const fn = 'function f(a) {\n    // was a + 1\n    return a+1;\n}';
+        const ok = expectSuccess(alignCandidateRange(fn, 0, fn.length, 'a + 1'));
+        expect(ok.original).toBe('a+1');
+        expect(ok.range).toEqual({ start: { line: 2, column: 11 }, end: { line: 2, column: 14 } });
+        expect(ok.recovered).toBe(true);
+    });
+
+    it('reports recovered=false on a verbatim match and true on a structural one', () => {
+        expect(
+            expectSuccess(alignCandidateRange(IS_AFTERNOON, 0, IS_AFTERNOON.length, 'hour >= 12'))
+                .recovered,
+        ).toBe(false);
+        expect(
+            expectSuccess(alignCandidateRange(IS_AFTERNOON, 0, IS_AFTERNOON.length, 'hour>=12'))
+                .recovered,
+        ).toBe(true);
+    });
+
+    it('keeps the verbatim drop reason when the shape replay finds nothing either', () => {
+        // Raw-ambiguous (two comments) but not an expression → ambiguous stands.
+        const twoComments = 'function f(a) {\n    // a ? a\n    // a ? a\n    return a;\n}';
+        expect(alignCandidateRange(twoComments, 0, twoComments.length, 'a ? a')).toEqual({
+            dropped: true,
+            reason: 'ambiguous',
+        });
+        // A single non-node-aligned occurrence with no equal-shape node → non-node-aligned stands.
+        const partial = 'function f(a) {\n    // a + 2\n    return a + 1;\n}';
+        expect(alignCandidateRange(partial, 0, partial.length, 'a + 2')).toEqual({
+            dropped: true,
+            reason: 'non-node-aligned',
+        });
+    });
+
+    it('still drops ambiguous when a raw-ambiguous needle has two equal-shape nodes', () => {
+        const fn = 'function f(a) {\n    // a + 1\n    return (a + 1) * (a+1);\n}';
+        expect(alignCandidateRange(fn, 0, fn.length, 'a + 1')).toEqual({
+            dropped: true,
+            reason: 'ambiguous',
+        });
+    });
+
     it('still applies the placement gates to a structurally re-found node', () => {
         // A method key re-found by shape is still not expression-placeable.
         const file = 'export class R {\n    dispatch(a) { return a; }\n}';

@@ -180,17 +180,37 @@ function logHeartbeat(
 }
 
 /**
+ * The node-alignment drop buckets of one call as `[count, label]` pairs in the
+ * summary line's FIXED order (unaligned, statement, unplaceable, ambiguous,
+ * not-found), zero counts included — the caller filters and sums.
+ */
+function alignDropBuckets(
+    dropCounts: Partial<Record<AlignDropReason, number>>,
+): ReadonlyArray<readonly [number, string]> {
+    return [
+        [dropCounts['non-node-aligned'] ?? 0, 'unaligned'],
+        [dropCounts['not-an-expression'] ?? 0, 'statement'],
+        [dropCounts['not-expression-placeable'] ?? 0, 'unplaceable'],
+        [dropCounts.ambiguous ?? 0, 'ambiguous'],
+        [dropCounts['not-found'] ?? 0, 'not-found'],
+    ];
+}
+
+/**
  * Emit the per-function DROP SUMMARY: ONE rolled-up line replacing the old
  * per-candidate `node-alignment drop` / `near-equivalent drop` stdout spam. The
  * full per-drop detail still lives in the JSON report (`state.dropped`); this is
  * just the console roll-up. No-op when no `log` sink is wired OR when this call
- * dropped nothing.
+ * neither dropped nor structurally recovered anything.
  *
  * Format: `stryker-llm: file:line — dropped M/T (buckets)` where `M` is this
  * call's total drops (node-alignment + near-equivalent), `T` is every candidate
  * the model returned for this call, and `buckets` lists ONLY the non-zero
  * categories in this fixed order: unaligned, statement, unplaceable, ambiguous,
- * not-found, equivalent.
+ * not-found, equivalent. When the call re-found any cached candidate by AST
+ * shape (range-align's structural fallback) the line ends with
+ * `; recovered R by shape` — and is emitted even with zero drops, with the
+ * bucket list omitted (`dropped 0/T; recovered R by shape`).
  *
  * `replacements` is the count of node-ALIGNED candidates (`proposed.replacements`)
  * — near-equivalent drops are a SUBSET of those, so `T = replacements + alignDrops`
@@ -203,20 +223,17 @@ function logDropSummary(
         replacements: number;
         dropCounts: Partial<Record<AlignDropReason, number>>;
         equivalent: number;
+        recovered: number;
     },
 ): void {
     if (log === undefined) {
         return;
     }
-    const { dropCounts, equivalent } = info;
-    const alignDrops =
-        (dropCounts['non-node-aligned'] ?? 0) +
-        (dropCounts['not-an-expression'] ?? 0) +
-        (dropCounts['not-expression-placeable'] ?? 0) +
-        (dropCounts.ambiguous ?? 0) +
-        (dropCounts['not-found'] ?? 0);
+    const { equivalent, recovered } = info;
+    const alignBuckets = alignDropBuckets(info.dropCounts);
+    const alignDrops = alignBuckets.reduce((sum, [count]) => sum + count, 0);
     const dropped = alignDrops + equivalent;
-    if (dropped === 0) {
+    if (dropped === 0 && recovered === 0) {
         return;
     }
     // Near-equivalent drops are already inside `info.replacements`, so the model's
@@ -224,23 +241,16 @@ function logDropSummary(
     const total = info.replacements + alignDrops;
 
     // Fixed bucket order; only non-zero categories are listed.
-    const buckets: string[] = [];
-    const add = (count: number, label: string): void => {
-        if (count > 0) {
-            buckets.push(`${String(count)} ${label}`);
-        }
-    };
-    add(dropCounts['non-node-aligned'] ?? 0, 'unaligned');
-    add(dropCounts['not-an-expression'] ?? 0, 'statement');
-    add(dropCounts['not-expression-placeable'] ?? 0, 'unplaceable');
-    add(dropCounts.ambiguous ?? 0, 'ambiguous');
-    add(dropCounts['not-found'] ?? 0, 'not-found');
-    add(equivalent, 'equivalent');
+    const buckets = [...alignBuckets, [equivalent, 'equivalent'] as const]
+        .filter(([count]) => count > 0)
+        .map(([count, label]) => `${String(count)} ${label}`);
 
+    const bucketText = buckets.length === 0 ? '' : ` (${buckets.join(', ')})`;
+    const recoveredText = recovered === 0 ? '' : `; recovered ${String(recovered)} by shape`;
     log(
         `stryker-llm: ${basename(info.target.fileName)}:` +
             `${String(info.target.range.start.line + 1)} — ` +
-            `dropped ${String(dropped)}/${String(total)} (${buckets.join(', ')})`,
+            `dropped ${String(dropped)}/${String(total)}${bucketText}${recoveredText}`,
     );
 }
 
@@ -338,12 +348,14 @@ function processProposeResult(
 
     // Per-function DROP SUMMARY: ONE rolled-up line (right after the heartbeat)
     // replacing the old per-candidate spam. Emitted only when this call dropped
-    // at least one candidate; buckets by typed category, non-zero only.
+    // or structurally recovered at least one candidate; buckets by typed
+    // category, non-zero only.
     logDropSummary(log, {
         target,
         replacements: proposed.replacements.length,
         dropCounts: proposed.dropCounts,
         equivalent: filtered.dropped.length,
+        recovered: proposed.recovered,
     });
 
     if (state.rolling.isFull() && state.rolling.mean() < diminishingReturns.minYieldPerCall) {
@@ -387,6 +399,7 @@ async function runWave(
                 t,
                 config.model,
                 budget.maxCandidatesPerFile,
+                ctx.log,
             );
             return propose(provider, t, {
                 maxCandidates: budget.maxCandidatesPerFile,

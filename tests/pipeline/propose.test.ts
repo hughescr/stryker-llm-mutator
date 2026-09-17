@@ -670,11 +670,72 @@ describe('propose — cached candidates replay across formatting-only edits', ()
         });
     });
 
-    it('an inline-comment edit keeps the purchased mutant', async () => {
+    it('a verbatim replay counts no recovery', async () => {
+        const inner = await buy(ORIGINAL, [INC]);
+        const result = await replay(inner, ORIGINAL);
+        expect(result.recovered).toBe(0);
+        expect(result.replacements.map(r => r.original)).toEqual(['a + 1']);
+    });
+
+    it('(a) a re-indentation of a multi-line sub-expression keeps the purchased mutant (recovered by shape)', async () => {
+        const src = 'function f(a, b) {\n  return g(\n    a,\n    b,\n  );\n}';
+        const inner = await buy(src, [
+            {
+                original: 'g(\n    a,\n    b,\n  )',
+                replacement: 'g(b, a)',
+                mutatorTag: 'swap',
+                rationale: 'r',
+            },
+        ]);
+        const result = await replay(
+            inner,
+            'function f(a, b) {\n    return g(\n        a,\n        b,\n    );\n}',
+        );
+        expect(result.dropCounts).toEqual({});
+        expect(result.recovered).toBe(1);
+        expect(result.replacements.map(r => r.original)).toEqual([
+            'g(\n        a,\n        b,\n    )',
+        ]);
+        expect(result.replacements[0]?.range).toEqual({
+            start: { line: 1, column: 11 },
+            end: { line: 4, column: 5 },
+        });
+    });
+
+    it('(b) a comment added inside the function but OUTSIDE the span keeps the purchased mutant', async () => {
+        const inner = await buy(ORIGINAL, [INC]);
+        // A comment that does not repeat the text: the verbatim match still wins.
+        const plain = await replay(inner, 'function f(a) {\n    // bump\n    return a + 1;\n}');
+        expect(plain.dropCounts).toEqual({});
+        expect(plain.recovered).toBe(0);
+        expect(plain.replacements.map(r => r.original)).toEqual(['a + 1']);
+        // A comment that DOES repeat the text made the raw substring ambiguous;
+        // the single real node is recovered by shape.
+        const echo = await replay(
+            inner,
+            'function f(a) {\n    // a + 1 is the offset\n    return a + 1;\n}',
+        );
+        expect(echo.dropCounts).toEqual({});
+        expect(echo.recovered).toBe(1);
+        expect(echo.replacements.map(r => r.original)).toEqual(['a + 1']);
+        expect(echo.replacements[0]?.range).toEqual({
+            start: { line: 2, column: 11 },
+            end: { line: 2, column: 16 },
+        });
+    });
+
+    it('(c) a comment inserted INSIDE the span keeps the purchased mutant, re-spelled with the comment', async () => {
+        // Documented outcome: RECOVERED by shape. The emitted `original` is the
+        // CURRENT text of the node, comment included, and the range spans it.
         const inner = await buy(ORIGINAL, [INC]);
         const result = await replay(inner, 'function f(a) { return a + /* inc */ 1; }');
         expect(result.dropCounts).toEqual({});
+        expect(result.recovered).toBe(1);
         expect(result.replacements.map(r => r.original)).toEqual(['a + /* inc */ 1']);
+        expect(result.replacements[0]?.range).toEqual({
+            start: { line: 0, column: 23 },
+            end: { line: 0, column: 38 },
+        });
     });
 
     it('a quote-style edit keeps the purchased mutant', async () => {

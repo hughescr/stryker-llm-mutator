@@ -413,8 +413,11 @@ stopping rules — before walking the paid queue in EV order, so a paid stop nev
 skips a cached function ranked below it. In frozen mode the uncached candidates are
 skipped outright. A hit replays the whole purchased mutant set even after a
 formatting-only edit: a cached candidate's `original` is matched verbatim first,
-then by AST shape (`range-align.ts` structural fallback), and emitted with the
-CURRENT source text + range; two equal-shape nodes still drop as `ambiguous`.
+then — whenever the verbatim search yields no single node-aligned occurrence
+(absent, raw-ambiguous because a comment now echoes it, or found only inside a
+comment) — by AST shape (`range-align.ts` structural fallback), and emitted with
+the CURRENT source text + range; two equal-shape nodes still drop as `ambiguous`,
+and the per-function summary counts the shape replays (`recovered N by shape`).
 
 **GATE 2 — COMPLEMENTARITY HAND-OFF (heuristics first).** Heuristics run inside
 Stryker for free (zero LLM spend). The LLM pre-pass is invoked only on

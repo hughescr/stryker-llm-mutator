@@ -69,7 +69,7 @@ describe('functionFingerprint — invariants (same fingerprint)', () => {
             'function f() { return 0o20n; }',
             'function f() { return 1_6n; }',
         ];
-        const digests = new Set(spellings.map(functionFingerprint));
+        const digests = new Set(spellings.map(spelling => functionFingerprint(spelling)));
         expect(digests.size).toBe(1);
         expect(functionFingerprint('function f() { return 17n; }')).not.toBe(
             functionFingerprint('function f() { return 16n; }'),
@@ -192,9 +192,12 @@ describe('functionFingerprint — function shapes', () => {
             ),
         );
         // The private-name tolerance does not mask a REAL syntax error elsewhere:
-        // a broken body still takes the text-hash fallback (comment-sensitive).
+        // a broken body still takes the text-hash fallback (reported via `log`).
         const broken = `async #build(now) { return this.#backend.load(now; }`;
-        expect(functionFingerprint(broken)).not.toBe(functionFingerprint(`${broken} // x`));
+        const lines: string[] = [];
+        functionFingerprint(broken, line => lines.push(line));
+        expect(lines).toHaveLength(1);
+        expect(functionFingerprint(broken)).not.toBe(functionFingerprint(a));
     });
 
     it('fingerprints a subclass constructor calling super() and a body using import.meta', () => {
@@ -210,14 +213,86 @@ describe('functionFingerprint — function shapes', () => {
         );
     });
 
-    it('falls back to a whitespace-collapsed text hash when the text does not parse', () => {
+    it('falls back to a text hash when the text does not parse: spaces/tabs collapse, indentation is ignored', () => {
         const broken = `function f( { return ; ]`;
-        const brokenReflowed = `function   f(   {\n\treturn ;   ]`;
+        const brokenReflowed = `function   f(   {\treturn ;   ]`;
         expect(functionFingerprint(broken)).toMatch(/^[0-9a-f]{64}$/);
         expect(functionFingerprint(broken)).toBe(functionFingerprint(brokenReflowed));
-        // The fallback is NOT comment-insensitive (nothing parsed) — the comment
-        // is part of the collapsed text.
-        expect(functionFingerprint(broken)).not.toBe(functionFingerprint(`${broken} // x`));
+        // Re-indentation and trailing blanks do not change the fallback digest.
+        const twoLines = `function f( {\n    return ; ]`;
+        expect(functionFingerprint(twoLines)).toBe(
+            functionFingerprint(`function f( {\n\t\treturn ; ]   `),
+        );
+        expect(functionFingerprint(twoLines)).toBe(
+            functionFingerprint(`function f( {\r\n        return ; ]`),
+        );
+    });
+
+    it('fallback: preserves newlines, so ASI-different text stays distinct', () => {
+        // `return\nx` and `return x` differ in behavior; the unparsed fallback
+        // must not merge them by collapsing the newline into a space.
+        const withNewline = `function f( { return\nx ; ]`;
+        const oneLine = `function f( { return x ; ]`;
+        expect(functionFingerprint(withNewline)).not.toBe(functionFingerprint(oneLine));
+        // Parseable proof of the same property (the AST route already keeps them apart).
+        expect(functionFingerprint(`function f(x) { return\nx }`)).not.toBe(
+            functionFingerprint(`function f(x) { return x }`),
+        );
+    });
+
+    it('fallback: ignores comments (line, block, multi-line block) in unparsed text', () => {
+        const broken = `function f( { return ; ]`;
+        expect(functionFingerprint(`${broken} // x`)).toBe(functionFingerprint(broken));
+        expect(functionFingerprint(`function f( { /* c */ return ; ]`)).toBe(
+            functionFingerprint(broken),
+        );
+        expect(functionFingerprint(`function f( {\n  // own line\n  return ; ]`)).toBe(
+            functionFingerprint(`function f( {\n  return ; ]`),
+        );
+        // A block comment holding a newline still separates its neighbours by a
+        // line terminator (ASI), so it is not the same as an inline one.
+        expect(functionFingerprint(`function f( { return/*\n*/x ; ]`)).toBe(
+            functionFingerprint(`function f( { return\nx ; ]`),
+        );
+        expect(functionFingerprint(`function f( { return/* */x ; ]`)).not.toBe(
+            functionFingerprint(`function f( { return\nx ; ]`),
+        );
+    });
+
+    it('fallback: does not mistake `//` or `/*` inside a string, template or regex for a comment', () => {
+        // If the scanner ate `//x"; ]` as a comment these two would collide.
+        expect(functionFingerprint(`function f( { return "http://x"; ]`)).not.toBe(
+            functionFingerprint(`function f( { return "http://y"; ]`),
+        );
+        expect(functionFingerprint(`function f( { return 'a/*b'; ]`)).not.toBe(
+            functionFingerprint(`function f( { return 'a/*c'; ]`),
+        );
+        expect(functionFingerprint('function f( { return `//x`; ]')).not.toBe(
+            functionFingerprint('function f( { return `//y`; ]'),
+        );
+        // The `${…}` is source text under test, not an interpolation here.
+        const hole = (tail: string): string => `function f( { return \`$\{a}//${tail}\`; ]`;
+        expect(functionFingerprint(hole('x'))).not.toBe(functionFingerprint(hole('y')));
+        expect(functionFingerprint(`function f( { return /[//]/.test(s); ]`)).not.toBe(
+            functionFingerprint(`function f( { return /[//]/.test(t); ]`),
+        );
+        // An escaped quote does not end the string early.
+        expect(functionFingerprint(`function f( { return "a\\"//b"; ]`)).not.toBe(
+            functionFingerprint(`function f( { return "a\\"//c"; ]`),
+        );
+        // Division is not a regex: the comment after it IS stripped.
+        expect(functionFingerprint(`function f( { return a / b; // c\n ]`)).toBe(
+            functionFingerprint(`function f( { return a / b; \n ]`),
+        );
+    });
+
+    it('fallback: reports itself through the optional log sink (only when used)', () => {
+        const lines: string[] = [];
+        functionFingerprint(`function f( { return ; ]`, line => lines.push(line));
+        expect(lines).toHaveLength(1);
+        expect(lines[0]).toContain('fingerprint fallback');
+        functionFingerprint(BASE, line => lines.push(line));
+        expect(lines).toHaveLength(1);
     });
 });
 
@@ -272,17 +347,36 @@ describe('stripComments', () => {
 
     it('keeps tokens separated when a comment is the only thing between them', () => {
         expect(stripComments('function f(){return/*comment*/1}')).toBe('function f(){return 1}');
+        // Identifier / number neighbours: one space, never fused into `ab` / `x1`.
+        expect(stripComments('function f(a){return typeof/*x*/a}')).toBe(
+            'function f(a){return typeof a}',
+        );
+        expect(stripComments('function f(x){return x/*x*/in/*y*/1}')).toBe(
+            'function f(x){return x in 1}',
+        );
     });
 
-    it('keeps a line terminator inside a comment (ASI-sensitive)', () => {
+    it('leaves nothing behind when a neighbour is already blank or an edge', () => {
+        expect(stripComments('function f(a, b){return a /*x*/ + b}')).toBe(
+            'function f(a, b){return a  + b}',
+        );
+        expect(stripComments('function f(){return 1;}/* tail */')).toBe('function f(){return 1;}');
+        expect(stripComments('/* head */function f(){return 1;}')).toBe('function f(){return 1;}');
+    });
+
+    it('replaces a block comment holding ANY line terminator with a single newline (ASI-sensitive)', () => {
         // `return/*\ncomment*/ 1` returns undefined via ASI; the stripped text
-        // must keep a newline after `return` so it still does.
+        // must keep a newline after `return` so it still does — for every
+        // ECMAScript line terminator, not only LF, and exactly one of them.
         expect(stripComments('function f(){return/*\ncomment*/ 1}')).toBe(
             'function f(){return\n 1}',
         );
         expect(stripComments('function f(){return/*\r\nx\r\ny*/ 1}')).toBe(
-            'function f(){return\n\n 1}',
+            'function f(){return\n 1}',
         );
+        expect(stripComments('function f(){return/*\rx*/ 1}')).toBe('function f(){return\n 1}');
+        expect(stripComments('function f(){return/*\u2028x*/ 1}')).toBe('function f(){return\n 1}');
+        expect(stripComments('function f(){return/*\u2029x*/ 1}')).toBe('function f(){return\n 1}');
     });
 
     it('never touches the contents of a multi-line template literal', () => {

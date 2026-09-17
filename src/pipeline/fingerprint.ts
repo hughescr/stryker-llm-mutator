@@ -47,14 +47,23 @@
  * the MODEL reads, so a comment edit cannot steer the proposals either. It is
  * SEMANTICS-PRESERVING: a comment that owns its whole line(s) is removed with
  * the line(s) (the preceding line terminator survives, so nothing that was
- * separated by a newline is joined); any other comment becomes the line
- * terminators it contained (an ASI-sensitive `return` + block comment holding a
- * newline + `1` keeps its newline), or a single space when it contained none and
- * both neighbours are non-whitespace (so `return` + comment + `1` cannot fuse
- * into `return1`), or nothing at
- * all otherwise. Code lines are never re-flowed and template / string / regex
- * contents are never touched, so a proposal's `original` sub-expression still
- * matches the real source verbatim wherever the source line had no comment.
+ * separated by a newline is joined); any other comment becomes ONE line feed
+ * when it contained any ECMAScript line terminator — LF, CR, LS or PS, each a
+ * newline for ASI (`return` + block comment holding one + `1` keeps a newline)
+ * — or a single space when it contained none and both neighbours are
+ * non-whitespace (so `return` + comment + `1` cannot fuse into `return1`), or
+ * nothing at all otherwise. Code lines are never re-flowed and template /
+ * string / regex contents are never touched, so a proposal's `original`
+ * sub-expression still matches the real source verbatim wherever the source
+ * line had no comment.
+ *
+ * When a slice parses under NO wrapper, `functionFingerprint` hashes a
+ * FALLBACK text instead: comments removed by a small tolerant scanner (string /
+ * template / regex aware, so `'//'` inside a literal is not a comment), runs of
+ * spaces and tabs collapsed, lines trimmed — but NEWLINES KEPT, because with
+ * nothing parsed a moved newline may be ASI-behavioural (`return\nx` is not
+ * `return x`). It is expected to be rare and is reported through the optional
+ * `log` sink each time it is used.
  */
 
 import { createHash } from 'node:crypto';
@@ -247,17 +256,261 @@ function sha256(text: string): string {
     return createHash('sha256').update(text).digest('hex');
 }
 
+/** An ECMAScript line terminator: LF, CR, LS or PS (each ends a line for ASI). */
+const LINE_TERMINATOR = /[\n\r\u2028\u2029]/;
+
+/** Every line-terminator spelling, for normalizing to a bare LF. */
+const LINE_TERMINATORS = /\r\n?|[\u2028\u2029]/g;
+
+/**
+ * A character after which a `/` starts a REGEX literal rather than a division:
+ * an operator, an opener or a separator. An identifier, a literal or a closer
+ * (`a`, `1`, `)`, `]`) before the `/` makes it a division.
+ */
+const REGEX_PRECEDER = /[(,=:[!&|?{};+\-*%<>~^]$/;
+
+/** Keywords after which a `/` starts a regex (`return /x/`), not a division. */
+const REGEX_KEYWORDS: ReadonlySet<string> = new Set([
+    'return',
+    'typeof',
+    'case',
+    'do',
+    'else',
+    'in',
+    'of',
+    'instanceof',
+    'new',
+    'delete',
+    'void',
+    'throw',
+    'yield',
+    'await',
+]);
+
+/** Whether a `/` at the current position (given the code emitted so far) opens a regex. */
+function startsRegex(before: string): boolean {
+    const trimmed = before.trimEnd();
+    if (trimmed.length === 0 || REGEX_PRECEDER.test(trimmed)) {
+        return true;
+    }
+    const word = /[$A-Z_a-z][\w$]*$/.exec(trimmed)?.[0];
+    return word !== undefined && REGEX_KEYWORDS.has(word);
+}
+
+/**
+ * The end offset (exclusive) of a `'`/`"` string starting at `start`: past its
+ * closing quote, honouring backslash escapes; an unterminated string ends at
+ * the line terminator (or the text end), as the tolerant scan requires.
+ */
+function scanQuoted(text: string, start: number): number {
+    const quote = text.charAt(start);
+    let i = start + 1;
+    while (i < text.length) {
+        const ch = text.charAt(i);
+        if (ch === '\\') {
+            i += 2;
+            continue;
+        }
+        if (ch === quote) {
+            return i + 1;
+        }
+        if (LINE_TERMINATOR.test(ch)) {
+            return i;
+        }
+        i += 1;
+    }
+    return text.length;
+}
+
+/**
+ * The end offset (exclusive) of a regex literal starting at `start`: past its
+ * closing `/` and flags, honouring escapes and `[…]` classes (where `/` is
+ * literal); an unterminated regex ends at the line terminator or the text end.
+ */
+function scanRegex(text: string, start: number): number {
+    let i = start + 1;
+    let inClass = false;
+    while (i < text.length) {
+        const ch = text.charAt(i);
+        if (ch === '\\') {
+            i += 2;
+            continue;
+        }
+        if (LINE_TERMINATOR.test(ch)) {
+            return i;
+        }
+        if (ch === '[') {
+            inClass = true;
+        } else if (ch === ']') {
+            inClass = false;
+        } else if (ch === '/' && !inClass) {
+            i += 1;
+            while (i < text.length && /[a-z]/i.test(text.charAt(i))) {
+                i += 1;
+            }
+            return i;
+        }
+        i += 1;
+    }
+    return text.length;
+}
+
+/**
+ * Remove comments from text that does NOT parse, with a small hand scanner that
+ * is string-, template- and regex-aware enough not to eat `'//'` inside a
+ * string, a template (including code inside its `${…}`) or a regex. A line
+ * comment goes; a block comment becomes a single LF when it held any line
+ * terminator (ASI) else a single space. Tolerant by design: an unterminated
+ * string / regex / comment ends at the next line terminator or the text end,
+ * and a `/` after `)` is read as a division (the only truly ambiguous spot).
+ */
+function stripCommentsTolerant(text: string): string {
+    let out = '';
+    let i = 0;
+    /** Open template `${` substitutions: the brace depth each one closes at. */
+    const substitutions: number[] = [];
+    let braces = 0;
+    let inTemplate = false;
+    while (i < text.length) {
+        if (inTemplate) {
+            // Template text runs to its closing backtick or the next `${`, both
+            // of which return to code mode (a `${` opens a substitution).
+            const { end, opensSubstitution } = scanTemplateText(text, i);
+            if (opensSubstitution) {
+                substitutions.push(braces);
+                braces += 1;
+            }
+            out += text.slice(i, end);
+            i = end;
+            inTemplate = false;
+            continue;
+        }
+        const comment = scanComment(text, i);
+        if (comment !== undefined) {
+            out += comment.replacement;
+            i = comment.end;
+            continue;
+        }
+        const ch = text.charAt(i);
+        let end = i + 1;
+        if (ch === '"' || ch === "'") {
+            end = scanQuoted(text, i);
+        } else if (ch === '/' && startsRegex(out)) {
+            end = scanRegex(text, i);
+        } else if (ch === '`') {
+            inTemplate = true;
+        } else if (ch === '{') {
+            braces += 1;
+        } else if (ch === '}') {
+            braces -= 1;
+            if (substitutions.at(-1) === braces) {
+                substitutions.pop();
+                inTemplate = true;
+            }
+        }
+        out += text.slice(i, end);
+        i = end;
+    }
+    return out;
+}
+
+/**
+ * Scan template text from `start` (just past a backtick or a substitution's
+ * closing `}`) to the end of its literal run: past the closing backtick, or
+ * past a `${` (`opensSubstitution`). Backslash escapes are honoured; an
+ * unterminated template runs to the text end.
+ */
+function scanTemplateText(
+    text: string,
+    start: number,
+): { end: number; opensSubstitution: boolean } {
+    let i = start;
+    while (i < text.length) {
+        const ch = text.charAt(i);
+        if (ch === '\\') {
+            i += 2;
+            continue;
+        }
+        if (ch === '`') {
+            return { end: i + 1, opensSubstitution: false };
+        }
+        if (ch === '$' && text.charAt(i + 1) === '{') {
+            return { end: i + 2, opensSubstitution: true };
+        }
+        i += 1;
+    }
+    return { end: text.length, opensSubstitution: false };
+}
+
+/**
+ * When a comment starts at `start`, its end offset (exclusive) and what stands
+ * in for it: nothing for a line comment (its terminator is kept), one LF for a
+ * block comment holding any line terminator, else one space. An unterminated
+ * block comment runs to the text end. `undefined` when no comment starts here.
+ */
+function scanComment(
+    text: string,
+    start: number,
+): { end: number; replacement: string } | undefined {
+    if (text.charAt(start) !== '/') {
+        return undefined;
+    }
+    const next = text.charAt(start + 1);
+    if (next === '/') {
+        const terminator = text.slice(start).search(LINE_TERMINATOR);
+        return { end: terminator === -1 ? text.length : start + terminator, replacement: '' };
+    }
+    if (next === '*') {
+        const close = text.indexOf('*/', start + 2);
+        const bodyEnd = close === -1 ? text.length : close;
+        return {
+            end: close === -1 ? text.length : close + 2,
+            replacement: LINE_TERMINATOR.test(text.slice(start + 2, bodyEnd)) ? '\n' : ' ',
+        };
+    }
+    return undefined;
+}
+
+/**
+ * The text a non-parsing function slice is hashed by: comments removed by the
+ * tolerant scanner, line terminators normalized to LF, runs of spaces / tabs
+ * collapsed to one space, each line trimmed and blank lines dropped. Newlines
+ * SURVIVE, so `return\nx` (ASI: `return; x`) and `return x` stay distinct.
+ */
+function fallbackText(text: string): string {
+    return stripCommentsTolerant(text.replaceAll(LINE_TERMINATORS, '\n'))
+        .replaceAll(/[\t ]+/g, ' ')
+        .replaceAll(/ ?\n ?/g, '\n')
+        .replaceAll(/\n+/g, '\n')
+        .trim();
+}
+
+/** Cap on how much of an unparsed slice the fallback log line echoes. */
+const FALLBACK_SNIPPET_LENGTH = 60;
+
 /**
  * The structural fingerprint of one function's source text: hex SHA-256 of the
  * canonical AST serialization (see the module header for what is ignored and
  * what is kept). When the text does not parse under any wrapper, falls back to
- * the SHA-256 of the whitespace-collapsed text — still stable across
- * reformatting, but comment-sensitive (nothing was parsed).
+ * the SHA-256 of its {@link fallbackText} — comment-insensitive and stable
+ * across re-indentation and space/tab runs, but newline-preserving (nothing
+ * was parsed, so ASI could make a moved newline behavioural). The fallback
+ * should be rare (a probe over a real cache saw none in 1,107 functions); pass
+ * `log` to have each use reported.
  */
-export function functionFingerprint(text: string): string {
+export function functionFingerprint(text: string, log?: (line: string) => void): string {
     const parsed = parseFunctionText(text);
     if (parsed === undefined) {
-        return sha256(text.replace(/\s+/g, ' ').trim());
+        const head = text.replaceAll(/\s+/g, ' ').trim();
+        const snippet =
+            head.length > FALLBACK_SNIPPET_LENGTH
+                ? `${head.slice(0, FALLBACK_SNIPPET_LENGTH)}…`
+                : head;
+        log?.(
+            'stryker-llm: fingerprint fallback — function text did not parse under any ' +
+                `wrapper; keyed by comment-stripped text instead: \`${snippet}\``,
+        );
+        return sha256(fallbackText(text));
     }
     return sha256(canonicalize(parsed.ast));
 }
@@ -321,9 +574,10 @@ interface Splice extends CommentSpan {
  *   - it owns its whole line(s) (only blanks before it on its first line, only
  *     blanks after it up to the line feed that ends its last line) → the lines
  *     go, line feed included; the line feed BEFORE it survives untouched;
- *   - otherwise it becomes exactly the line feeds it contained (`\r\n` → `\n`),
- *     or a single space when it had none and sits between two non-blank
- *     characters, or nothing when a neighbour is already blank / an edge.
+ *   - otherwise it becomes ONE line feed when it contained any line terminator
+ *     (LF, CR, LS or PS — each is a newline for ASI), or a single space when it
+ *     had none and sits between two non-blank characters, or nothing when a
+ *     neighbour is already blank / an edge.
  * All decisions are made against the ORIGINAL text, so they are independent of
  * the order the splices are applied in.
  */
@@ -337,9 +591,10 @@ function spliceFor(text: string, { start, end }: CommentSpan): Splice {
     if (ownsLines) {
         return { start: lineStart, end: lineFeed === -1 ? lineEnd : lineEnd + 1, replacement: '' };
     }
-    const lineFeeds = text.slice(start, end).replaceAll(/[^\n]/g, '');
-    if (lineFeeds.length > 0) {
-        return { start, end, replacement: lineFeeds };
+    // Any ECMAScript line terminator inside the comment (LF, CR, LS, PS) ends
+    // a line for ASI; one LF stands in for all of them.
+    if (LINE_TERMINATOR.test(text.slice(start, end))) {
+        return { start, end, replacement: '\n' };
     }
     // `charAt` is '' at either edge of the text, which reads as "not a token".
     const fused = /\S/.test(text.charAt(start - 1)) && /\S/.test(text.charAt(end));

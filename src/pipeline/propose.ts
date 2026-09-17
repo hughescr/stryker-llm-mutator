@@ -254,13 +254,22 @@ export interface ProposeCacheIdentity {
  * @param target The enclosing-function target (only `spanText`, `fileName`, `functionName` are read).
  * @param model The requested model id or alias (the same string the provider is given).
  * @param maxCandidates The per-call candidate cap (shapes both the prompt and the schema).
+ * @param log Optional sink for the (rare) fingerprint text-hash fallback notice,
+ *   suffixed with the target's location; the pre-pass passes its logger, the
+ *   targeting probe (which keys the same targets again) passes none.
  */
 export function proposeCacheIdentity(
     target: ProposeTarget,
     model: string,
     maxCandidates: number = DEFAULT_MAX_CANDIDATES,
+    log?: (line: string) => void,
 ): ProposeCacheIdentity {
-    const fingerprint = functionFingerprint(target.spanText);
+    const fingerprint = functionFingerprint(
+        target.spanText,
+        log === undefined
+            ? undefined
+            : line => log(`${line} (${target.fileName}:${String(target.range.start.line + 1)})`),
+    );
     const cacheKey = computeCacheKey({
         model,
         prompt: `fp:${fingerprint}|max:${String(maxCandidates)}`,
@@ -297,6 +306,12 @@ export interface ProposeResult {
      * the reason text). Only reasons that actually occurred carry a key.
      */
     dropCounts: Partial<Record<AlignDropReason, number>>;
+    /**
+     * How many of {@link replacements} were re-found by AST SHAPE rather than
+     * verbatim (range-align's structural fallback) — cached candidates replayed
+     * against respelled source. Logged per call next to the drop buckets.
+     */
+    recovered: number;
 }
 
 /** Cap on how much of a candidate's sub-expression we echo into a drop `reason`. */
@@ -362,12 +377,15 @@ function resolveAlignInputs(target: ProposeTarget): {
  * On a successful alignment the `range` is the aligned EXPRESSION node's range and
  * `original` is the verbatim sub-expression; on failure the candidate is dropped
  * with a typed reason (the five §4 Gate 4 conditions). Returns the `Replacement`
- * or the `DroppedReplacement` describing the drop.
+ * (flagged `recovered` when it was re-found by shape rather than verbatim) or
+ * the `DroppedReplacement` describing the drop.
  */
 function toReplacement(
     target: ProposeTarget,
     candidate: RawCandidate,
-): Replacement | { drop: DroppedReplacement; category: AlignDropReason } {
+):
+    | { replacement: Replacement; recovered: boolean }
+    | { drop: DroppedReplacement; category: AlignDropReason } {
     const tag = candidate.mutatorTag.trim();
     const mutatorName =
         tag.length > 0 ? `${PROPOSE_MUTATOR_PREFIX}/${tag}` : PROPOSE_MUTATOR_PREFIX;
@@ -386,12 +404,15 @@ function toReplacement(
         };
     }
     return {
-        fileName: target.fileName,
-        range: aligned.range,
-        original: aligned.original,
-        replacement: candidate.replacement,
-        mutatorName,
-        rationale: candidate.rationale,
+        recovered: aligned.recovered,
+        replacement: {
+            fileName: target.fileName,
+            range: aligned.range,
+            original: aligned.original,
+            replacement: candidate.replacement,
+            mutatorName,
+            rationale: candidate.rationale,
+        },
     };
 }
 
@@ -442,14 +463,18 @@ export async function propose(
     const replacements: Replacement[] = [];
     const dropped: DroppedReplacement[] = [];
     const dropCounts: Partial<Record<AlignDropReason, number>> = {};
+    let recovered = 0;
     for (const candidate of candidates) {
         const mapped = toReplacement(target, candidate);
         if ('drop' in mapped) {
             dropped.push(mapped.drop);
             dropCounts[mapped.category] = (dropCounts[mapped.category] ?? 0) + 1;
         } else {
-            replacements.push(mapped);
+            replacements.push(mapped.replacement);
+            if (mapped.recovered) {
+                recovered += 1;
+            }
         }
     }
-    return { replacements, dropped, dropCounts, cached: result.cached ?? false };
+    return { replacements, dropped, dropCounts, recovered, cached: result.cached ?? false };
 }

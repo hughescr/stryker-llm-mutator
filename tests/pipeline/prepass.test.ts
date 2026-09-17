@@ -291,6 +291,64 @@ describe('runPrePass', () => {
         expect(lines.some(l => l.includes('pre-pass ['))).toBe(true);
     });
 
+    it('reports a fingerprint text-hash fallback (unparseable function text) with the target location', async () => {
+        const broken = 'function f(a) {\n    return a + 1;\n]';
+        const inner = new MockProvider({
+            responder: () => ({ candidates: [] }),
+            costUsd: 0,
+        });
+        const lines: string[] = [];
+        await runPrePass(budgeted(inner), [target('/abs/broken.ts', 6, broken)], cfg(), {
+            cost,
+            log: l => lines.push(l),
+        });
+        const fallback = lines.filter(l => l.includes('fingerprint fallback'));
+        expect(fallback).toHaveLength(1);
+        expect(fallback[0]).toContain('(/abs/broken.ts:7)');
+    });
+
+    it('logs the count of candidates RECOVERED by shape alongside the drop buckets', async () => {
+        // `a + 1` is spelled `a+1` in the function and also echoed by a comment:
+        // the verbatim search is raw-ambiguous, the shape replay recovers the one
+        // real node. A second candidate stays unrecoverable (absent) → not-found.
+        const fn = 'function f(a) {\n    // a + 1\n    return a+1;\n}';
+        const inner = new MockProvider({
+            responder: () => ({
+                candidates: [
+                    candidate('a - 1', 'dec', 'a + 1'), // recovered by shape
+                    candidate('z - 1', 'gone', 'z + 9'), // absent → not-found
+                ],
+            }),
+            costUsd: 0,
+        });
+        const lines: string[] = [];
+        const result = await runPrePass(budgeted(inner), [target('/abs/r.ts', 4, fn)], cfg(), {
+            cost,
+            log: l => lines.push(l),
+        });
+        expect(result.survivors.map(r => r.original)).toEqual(['a+1']);
+        const summary = lines.filter(l => l.includes('— dropped '));
+        expect(summary).toHaveLength(1);
+        expect(summary[0]).toBe(
+            'stryker-llm: r.ts:5 — dropped 1/2 (1 not-found); recovered 1 by shape',
+        );
+        // A call that recovered but dropped nothing still gets the line (a
+        // different function, so the first call's cache entry is not replayed).
+        const fn2 = 'function g(b) {\n    // b + 1\n    return b+1;\n}';
+        const onlyRecovered = new MockProvider({
+            responder: () => ({ candidates: [candidate('b - 1', 'dec', 'b + 1')] }),
+            costUsd: 0,
+        });
+        const lines2: string[] = [];
+        await runPrePass(budgeted(onlyRecovered), [target('/abs/r.ts', 4, fn2)], cfg(), {
+            cost,
+            log: l => lines2.push(l),
+        });
+        expect(lines2.filter(l => l.includes('— dropped '))).toEqual([
+            'stryker-llm: r.ts:5 — dropped 0/1; recovered 1 by shape',
+        ]);
+    });
+
     it('STOPS on the cost ceiling and KEEPS the partial survivors', async () => {
         // Each candidate mutates the located sub-expression `x + 1`; a distinct
         // replacement per prompt length keeps each survivor unique.

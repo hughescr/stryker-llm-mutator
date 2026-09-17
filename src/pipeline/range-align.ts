@@ -69,16 +69,23 @@
  * paren / inline-comment edit still HITS — but the cached candidate's `original`
  * was spelled against the OLD text and its verbatim substring may be gone
  * (`a + 1` after the source became `a+1`). Dropping it as `not-found` would
- * silently discard a mutant the hit promised. So when the verbatim search finds
- * NOTHING, the candidate is re-found by AST SHAPE: `original` is parsed as an
- * expression and canonicalized exactly as the fingerprint is
- * (`expressionShape`), every node inside the function is canonicalized the same
- * way (`nodeShape`), and a SINGLE equal-shape node is the match — its CURRENT
- * source text becomes `original` and its span the range. Two equal-shape nodes
- * are `ambiguous` (the same safeguard as two verbatim occurrences); none, or an
- * `original` that is not a single expression, stays `not-found`. A verbatim hit
- * always wins over a structural one (it is what the model literally wrote),
- * and the placement gates (d)/(e) below apply to a structural match unchanged.
+ * silently discard a mutant the hit promised. So when the verbatim search yields
+ * NO node-aligned single occurrence — the text is absent, or it occurs MORE THAN
+ * ONCE (a comment added inside the function now echoes it: `// a + 1 is the
+ * offset`), or its ONE occurrence aligns to no node (the only verbatim copy
+ * left is inside a comment, the code having been respelled) — the candidate is
+ * re-found by AST SHAPE: `original` is parsed as an expression and canonicalized
+ * exactly as the fingerprint is (`expressionShape`), every node inside the
+ * function is canonicalized the same way (`nodeShape`), and a SINGLE equal-shape
+ * node is the match — its CURRENT source text becomes `original`, its span the
+ * range, and the result is flagged `recovered` so the pre-pass can count the
+ * replays per call. Two equal-shape nodes are `ambiguous` (the same safeguard as
+ * two verbatim code occurrences); none keeps the verbatim outcome as the drop
+ * reason (`not-found`, `ambiguous` or `non-node-aligned`), so a fresh model
+ * candidate that was never alignable reports exactly what it did before. A
+ * node-aligned verbatim hit always wins over a structural one (it is what the
+ * model literally wrote), and the placement gates (d)/(e) below apply to a
+ * structural match unchanged.
  */
 
 import { parse } from '@babel/parser';
@@ -126,6 +133,12 @@ interface AlignSuccess {
      * structural one.
      */
     original: string;
+    /**
+     * True when the node was re-found by AST SHAPE rather than verbatim (the
+     * STRUCTURAL FALLBACK in the module header) — a purchased candidate replayed
+     * against respelled source. Counted per call next to the drop reasons.
+     */
+    recovered: boolean;
 }
 
 /** A dropped candidate: the reason it could not be node-aligned. */
@@ -369,38 +382,40 @@ function locateCandidate(
     fnStartOffset: number,
     fnEndOffset: number,
     original: string,
-): { match: SpanMatch; original: string } | AlignDrop {
-    // (a/b) Locate `original` verbatim inside the function: an ambiguous
-    // substring drops outright; a single occurrence is node-aligned in (c).
+): { match: SpanMatch; original: string; recovered: boolean } | AlignDrop {
+    // (a/b) Locate `original` verbatim inside the function. A single occurrence
+    // that node-aligns in (c) wins outright; an ambiguous substring or a
+    // non-node-aligned one falls through to the structural pass — the raw text
+    // may sit inside a comment or a string that a comment-only edit added.
     const located = locateInFunction(fileContent, fnStartOffset, fnEndOffset, original);
-    if (located === 'ambiguous') {
-        return { dropped: true, reason: located };
-    }
     const program = parseProgram(fileContent);
-
+    let verbatimFailure: AlignDropReason = 'not-found';
     if (typeof located === 'number') {
-        // (c) Find the node whose span EXACTLY equals the located substring. No
-        // exact-span node ⇒ non-node-aligned drop.
+        // (c) Find the node whose span EXACTLY equals the located substring.
         const match = findExactSpanNode(program, located, located + original.length);
-        return match === undefined
-            ? { dropped: true, reason: 'non-node-aligned' }
-            : { match, original };
+        if (match !== undefined) {
+            return { match, original, recovered: false };
+        }
+        verbatimFailure = 'non-node-aligned';
+    } else {
+        verbatimFailure = located;
     }
 
-    // (c') Not found verbatim: the source may have been respelled since the
-    // candidate was cached. Re-find it by shape; exactly one node must match.
+    // (c') No usable verbatim occurrence: the source may have been respelled
+    // since the candidate was cached. Re-find it by shape; exactly one node must
+    // match. Two are ambiguous; none keeps the verbatim outcome as the reason.
     const shape = expressionShape(original);
     const matches =
         shape === undefined ? [] : findShapeMatches(program, fnStartOffset, fnEndOffset, shape);
     if (matches.length === 0) {
-        return { dropped: true, reason: 'not-found' };
+        return { dropped: true, reason: verbatimFailure };
     }
     if (matches.length > 1) {
         return { dropped: true, reason: 'ambiguous' };
     }
     const [match] = matches as [SpanMatch];
     const { start, end } = offsetsOf(match.node);
-    return { match, original: fileContent.slice(start, end) };
+    return { match, original: fileContent.slice(start, end), recovered: true };
 }
 
 /**
@@ -447,5 +462,9 @@ export function alignCandidateRange(
 
     // (f) Success: convert the located node's babel loc to a 0-based Stryker range
     // (the node is a LocatedNode, so `loc` is guaranteed present).
-    return { range: toStrykerRange(node.loc), original: located.original };
+    return {
+        range: toStrykerRange(node.loc),
+        original: located.original,
+        recovered: located.recovered,
+    };
 }
