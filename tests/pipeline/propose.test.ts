@@ -3,7 +3,12 @@ import { describe, expect, it } from 'bun:test';
 import type { LLMProvider, ProviderRequest, ProviderResult } from '../../src/llm/types';
 import type { SourceRange } from '../../src/seam/types';
 
-import { PROPOSE_MUTATOR_PREFIX, propose, type ProposeTarget } from '../../src/pipeline';
+import {
+    PROPOSE_MUTATOR_PREFIX,
+    propose,
+    proposeCacheIdentity,
+    type ProposeTarget,
+} from '../../src/pipeline';
 
 /**
  * A canned, offline {@link LLMProvider} for tests. It never touches the network:
@@ -229,10 +234,15 @@ describe('propose — node-aligned sub-expression contract', () => {
             },
         );
 
-        await propose(provider, { ...TARGET, context: '// surrounding module context' });
+        await propose(provider, {
+            ...TARGET,
+            context: 'const LIMIT = 3; // surrounding module context',
+        });
 
         expect(seen?.prompt).toContain('CONTEXT');
-        expect(seen?.prompt).toContain('surrounding module context');
+        expect(seen?.prompt).toContain('const LIMIT = 3;');
+        // The context is comment-stripped like the function text.
+        expect(seen?.prompt).not.toContain('surrounding module context');
     });
 
     it('omits the CONTEXT block when context is undefined', async () => {
@@ -450,6 +460,115 @@ describe('propose — node-alignment drop conditions', () => {
         expect(replacements[0]?.range).toEqual({
             start: { line: 0, column: 0 },
             end: { line: 0, column: 5 },
+        });
+    });
+});
+
+describe('propose — comment-stripped prompt + cache identity', () => {
+    const COMMENTED = [
+        'function max(a: number, b: number) {',
+        '    // Stryker disable next-line all',
+        '    return a > b ? a : b; /* pick the larger */',
+        '}',
+    ].join('\n');
+    const COMMENTED_TARGET: ProposeTarget = {
+        fileName: '/abs/calc.ts',
+        range: { start: { line: 0, column: 0 }, end: { line: 3, column: 1 } },
+        spanText: COMMENTED,
+        context: COMMENTED,
+        fileContent: COMMENTED,
+        spanStartOffset: 0,
+        spanEndOffset: COMMENTED.length,
+        functionName: 'max',
+    };
+
+    it('sends the model the COMMENT-STRIPPED function (and context) text', async () => {
+        let seen: ProviderRequest | undefined;
+        const provider = makeMockProvider(
+            { candidates: [] },
+            {
+                onRequest: r => {
+                    seen = r;
+                },
+            },
+        );
+        await propose(provider, COMMENTED_TARGET);
+        expect(seen?.prompt).not.toContain('Stryker disable');
+        expect(seen?.prompt).not.toContain('pick the larger');
+        expect(seen?.prompt).toContain('return a > b ? a : b;');
+        // Stripped context === stripped function → no CONTEXT block.
+        expect(seen?.prompt).not.toContain('CONTEXT');
+    });
+
+    it('still node-aligns a candidate against the REAL (commented) source', async () => {
+        const provider = makeMockProvider({
+            candidates: [
+                { original: 'a > b', replacement: 'a < b', mutatorTag: 'flip', rationale: 'n' },
+            ],
+        });
+        const { replacements, dropped } = await propose(provider, COMMENTED_TARGET);
+        expect(dropped).toEqual([]);
+        expect(replacements).toHaveLength(1);
+        // Line 2 (0-based) of the commented source: `    return a > b ? a : b; …`.
+        expect(replacements[0]?.range.start).toEqual({ line: 2, column: 11 });
+    });
+
+    it('forwards cacheMeta alongside cacheKey and reports whether the result was cached', async () => {
+        let seen: ProviderRequest | undefined;
+        const provider: LLMProvider = {
+            name: 'mock',
+            generate<T>(request: ProviderRequest): Promise<ProviderResult<T>> {
+                seen = request;
+                return Promise.resolve({
+                    value: { candidates: [] } as T,
+                    costUsd: 0,
+                    model: 'm',
+                    cached: true,
+                });
+            },
+        };
+        const meta = { fingerprint: 'f'.repeat(64), fileName: '/abs/calc.ts', functionName: 'max' };
+        const result = await propose(provider, COMMENTED_TARGET, {
+            cacheKey: 'k',
+            cacheMeta: meta,
+        });
+        expect(seen?.cacheKey).toBe('k');
+        expect(seen?.cacheMeta).toEqual(meta);
+        expect(result.cached).toBe(true);
+    });
+
+    it('reports cached: false when the provider does not flag the result', async () => {
+        const result = await propose(makeMockProvider({ candidates: [] }), COMMENTED_TARGET);
+        expect(result.cached).toBe(false);
+    });
+
+    it('proposeCacheIdentity: same key for comment/whitespace variants, distinct per model/cap/function', () => {
+        const plain = proposeCacheIdentity(TARGET, 'haiku', 20);
+        const commented = proposeCacheIdentity(COMMENTED_TARGET, 'haiku', 20);
+        expect(plain.cacheKey).toMatch(/^[0-9a-f]{64}$/);
+        expect(commented.cacheKey).toBe(plain.cacheKey);
+        expect(commented.meta.fingerprint).toBe(plain.meta.fingerprint);
+
+        expect(proposeCacheIdentity(TARGET, 'sonnet', 20).cacheKey).not.toBe(plain.cacheKey);
+        expect(proposeCacheIdentity(TARGET, 'haiku', 8).cacheKey).not.toBe(plain.cacheKey);
+        const other: ProposeTarget = {
+            ...TARGET,
+            spanText: 'function min(a, b) { return a < b ? a : b; }',
+        };
+        expect(proposeCacheIdentity(other, 'haiku', 20).cacheKey).not.toBe(plain.cacheKey);
+    });
+
+    it('proposeCacheIdentity: meta carries the fingerprint + provenance (functionName only when known)', () => {
+        const withName = proposeCacheIdentity(COMMENTED_TARGET, 'haiku', 20);
+        expect(withName.meta).toEqual({
+            fingerprint: withName.meta.fingerprint,
+            fileName: '/abs/calc.ts',
+            functionName: 'max',
+        });
+        const anonymous = proposeCacheIdentity(TARGET, 'haiku', 20);
+        expect(anonymous.meta).toEqual({
+            fingerprint: anonymous.meta.fingerprint,
+            fileName: 'src/calc.ts',
         });
     });
 });

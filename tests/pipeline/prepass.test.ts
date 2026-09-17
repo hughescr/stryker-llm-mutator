@@ -18,7 +18,8 @@ import { CostAccumulator, MockProvider, ResponseCache } from '../../src/llm/inde
 import { createBudgetedProvider } from '../../src/pipeline/budgeted-provider';
 import { dedupKey } from '../../src/pipeline/filters';
 import { RollingYield, runPrePass } from '../../src/pipeline/prepass';
-import type { ProposeTarget } from '../../src/pipeline/propose';
+import { functionFingerprint } from '../../src/pipeline/fingerprint';
+import { proposeCacheIdentity, type ProposeTarget } from '../../src/pipeline/propose';
 import type { LLMProvider, ProviderRequest, ProviderResult } from '../../src/llm/types';
 import type { SourceRange } from '../../src/seam/types';
 
@@ -339,13 +340,15 @@ describe('runPrePass', () => {
             costUsd: 0,
         });
         const config = cfg({ diminishingReturns: { window: 2, minYieldPerCall: 0.1 } });
-        // Same function (with a unique `z + 1`) repeated → same survivor → 0 new.
-        const fn = 'function fz(z) {\n    return z + 1;\n}';
+        // Four DISTINCT functions (distinct cache keys → four PAID calls) whose
+        // same-length names put the unique `z + 1` at the same aligned range →
+        // the same survivor identity every time → 0 new after the first.
+        const fn = (name: string) => `function ${name}(z) {\n    return z + 1;\n}`;
         const targets = [
-            target('/abs/a.ts', 0, fn),
-            target('/abs/a.ts', 0, fn), // same span+replacement → 0 new
-            target('/abs/a.ts', 0, fn),
-            target('/abs/a.ts', 0, fn),
+            target('/abs/a.ts', 0, fn('fa')),
+            target('/abs/a.ts', 0, fn('fb')), // same range+replacement → 0 new
+            target('/abs/a.ts', 0, fn('fc')),
+            target('/abs/a.ts', 0, fn('fd')),
         ];
         const result = await runPrePass(budgeted(inner), targets, config, { cost });
         expect(result.stopReason).toBe('diminishing-returns');
@@ -554,5 +557,183 @@ describe('runPrePass', () => {
         expect(heartbeats).toHaveLength(5);
         expect(heartbeats[0]).toContain('[1/5]');
         expect(heartbeats[4]).toContain('[5/5]');
+    });
+});
+
+describe('runPrePass — fingerprint-keyed cache + paid-only accounting', () => {
+    let dir: string;
+    let cache: ResponseCache;
+    let cost: CostAccumulator;
+
+    beforeEach(async () => {
+        dir = await mkdtemp(join(tmpdir(), 'stryker-llm-prepass-fp-'));
+        cache = new ResponseCache(dir);
+        cost = new CostAccumulator();
+    });
+
+    afterEach(async () => {
+        await rm(dir, { recursive: true, force: true });
+    });
+
+    function budgeted(inner: LLMProvider, over: Record<string, unknown> = {}) {
+        return createBudgetedProvider(inner, {
+            cache,
+            cost,
+            maxCostUsd: 5,
+            maxLlmCallsPerRun: 500,
+            defaultModel: 'haiku',
+            ...over,
+        });
+    }
+
+    const FN = 'function fp(p) {\n    return p + 1;\n}';
+    const FN_COMMENTED =
+        'function fp(p) {\n    // Stryker disable next-line all\n    return p + 1; /* c */\n}';
+
+    it('keys each call by the function FINGERPRINT and records meta on the entry', async () => {
+        const inner = new MockProvider({
+            responder: () => ({ candidates: [candidate('p - 1', 'dec', 'p + 1')] }),
+            costUsd: 0.1,
+        });
+        const t = { ...target('/abs/fp.ts', 0, FN), functionName: 'fp' };
+        await runPrePass(budgeted(inner), [t], cfg(), { cost });
+
+        const { cacheKey } = proposeCacheIdentity(
+            t,
+            'haiku',
+            cfg().dynamicLLM.budget.maxCandidatesPerFile,
+        );
+        const entry = await cache.get(cacheKey);
+        expect(entry).toBeDefined();
+        expect(entry?.meta).toEqual({
+            fingerprint: functionFingerprint(FN),
+            fileName: '/abs/fp.ts',
+            functionName: 'fp',
+        });
+    });
+
+    it('a comment-only edit to the function is a cache HIT (no second paid call)', async () => {
+        const inner = new MockProvider({
+            responder: () => ({ candidates: [candidate('p - 1', 'dec', 'p + 1')] }),
+            costUsd: 0.1,
+        });
+        const first = await runPrePass(budgeted(inner), [target('/abs/fp.ts', 0, FN)], cfg(), {
+            cost,
+        });
+        expect(first.callsIssued).toBe(1);
+
+        const cost2 = new CostAccumulator();
+        const second = await runPrePass(
+            createBudgetedProvider(inner, {
+                cache,
+                cost: cost2,
+                maxCostUsd: 5,
+                maxLlmCallsPerRun: 500,
+                defaultModel: 'haiku',
+            }),
+            [target('/abs/fp.ts', 0, FN_COMMENTED)],
+            cfg(),
+            { cost: cost2 },
+        );
+        expect(inner.calls).toHaveLength(1);
+        expect(second.cost.totalUsd).toBe(0);
+        // The cached proposal still node-aligns against the COMMENTED source.
+        expect(second.survivors.map(r => r.replacement)).toEqual(['p - 1']);
+        expect(second.survivors[0]?.range.start).toEqual({ line: 2, column: 11 });
+    });
+
+    it('callsIssued counts only PAID calls (a warm run issues 0) while the heartbeat still walks every target', async () => {
+        const inner = new MockProvider({
+            responder: () => ({ candidates: [candidate('p - 1', 'dec', 'p + 1')] }),
+            costUsd: 0.1,
+        });
+        const targets = [
+            target('/abs/a.ts', 0, 'function fa(p) {\n    return p + 1;\n}'),
+            target('/abs/b.ts', 0, 'function fb(p) {\n    return p + 1;\n}'),
+        ];
+        await runPrePass(budgeted(inner), targets, cfg(), { cost });
+
+        const cost2 = new CostAccumulator();
+        const lines: string[] = [];
+        const warm = await runPrePass(
+            createBudgetedProvider(inner, {
+                cache,
+                cost: cost2,
+                maxCostUsd: 5,
+                maxLlmCallsPerRun: 500,
+                defaultModel: 'haiku',
+            }),
+            targets,
+            cfg(),
+            { cost: cost2, log: l => lines.push(l) },
+        );
+        expect(warm.callsIssued).toBe(0);
+        expect(warm.cost.calls).toBe(2); // hits are still recorded $0 calls
+        const heartbeats = lines.filter(l => l.includes('pre-pass ['));
+        expect(heartbeats).toHaveLength(2);
+        expect(heartbeats[0]).toContain('[1/2]');
+        expect(heartbeats[1]).toContain('[2/2]');
+    });
+
+    it('diminishing returns IGNORES free hits: zero-yield cached targets never trip the stop', async () => {
+        // Pre-seed three zero-candidate entries under the exact keys the pre-pass
+        // will compute, then append one PAID target. window=2 floor=0.1: had the
+        // free hits counted, the window would fill with 0,0 and stop BEFORE the
+        // paid target; they do not, so the paid target still runs.
+        const maxCandidates = cfg().dynamicLLM.budget.maxCandidatesPerFile;
+        const cachedTargets = ['ca', 'cb', 'cc'].map(name =>
+            target('/abs/c.ts', 0, `function ${name}(q) {\n    return q + 1;\n}`),
+        );
+        for (const t of cachedTargets) {
+            // oxlint-disable-next-line no-await-in-loop -- sequential seeding of three entries.
+            await cache.set(proposeCacheIdentity(t, 'haiku', maxCandidates).cacheKey, {
+                value: { candidates: [] },
+                costUsd: 0,
+                model: 'haiku',
+            });
+        }
+        const inner = new MockProvider({
+            responder: () => ({ candidates: [candidate('r - 1', 'dec', 'r + 1')] }),
+            costUsd: 0.1,
+        });
+        const paid = target('/abs/p.ts', 0, 'function pd(r) {\n    return r + 1;\n}');
+        const config = cfg({ diminishingReturns: { window: 2, minYieldPerCall: 0.1 } });
+
+        const result = await runPrePass(budgeted(inner), [...cachedTargets, paid], config, {
+            cost,
+        });
+        expect(result.stopReason).toBe('queue-exhausted');
+        expect(result.callsIssued).toBe(1);
+        expect(inner.calls).toHaveLength(1);
+        expect(result.survivors.map(r => r.replacement)).toEqual(['r - 1']);
+    });
+
+    it('free hits never exhaust maxLlmCallsPerRun (cached targets beyond the cap, then a paid one)', async () => {
+        const maxCandidates = cfg().dynamicLLM.budget.maxCandidatesPerFile;
+        const cachedTargets = ['xa', 'xb', 'xc'].map(name =>
+            target('/abs/x.ts', 0, `function ${name}(q) {\n    return q + 1;\n}`),
+        );
+        for (const t of cachedTargets) {
+            // oxlint-disable-next-line no-await-in-loop -- sequential seeding of three entries.
+            await cache.set(proposeCacheIdentity(t, 'haiku', maxCandidates).cacheKey, {
+                value: { candidates: [] },
+                costUsd: 0,
+                model: 'haiku',
+            });
+        }
+        const inner = new MockProvider({
+            responder: () => ({ candidates: [candidate('r - 1', 'dec', 'r + 1')] }),
+            costUsd: 0.1,
+        });
+        const paid = target('/abs/p.ts', 0, 'function pe(r) {\n    return r + 1;\n}');
+        const result = await runPrePass(
+            budgeted(inner, { maxLlmCallsPerRun: 1 }),
+            [...cachedTargets, paid],
+            cfg(),
+            { cost },
+        );
+        expect(result.stopReason).toBe('queue-exhausted');
+        expect(inner.calls).toHaveLength(1);
+        expect(result.survivors.map(r => r.replacement)).toEqual(['r - 1']);
     });
 });

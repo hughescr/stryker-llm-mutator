@@ -22,6 +22,14 @@
  * "span" at the function-batch granularity since Gate 3 batches by function), and
  * bounded by a global top-K from the call budget.
  *
+ * MONOTONE SELECTION: the per-file cut and the global top-K bound only the
+ * UNCACHED (paid) candidates. Every eligible function whose proposals are
+ * already in the response cache (the injected `isCached` probe, keyed exactly as
+ * the pre-pass keys its calls) is ALWAYS included — a hit is free and fast, so
+ * the mutant set can only grow run-over-run instead of drifting as EV ranks
+ * shuffle functions in and out of a fixed window. In frozen (cache-only) mode
+ * the uncached candidates are skipped outright, since they could yield nothing.
+ *
  * TRAVERSAL: a tiny hand-rolled recursive walk over `@babel/types` nodes (parsed
  * by `@babel/parser`, the bun-safe parser `filters.ts` also uses). We avoid
  * `@babel/traverse` entirely — it ships no typings and would force an untyped
@@ -80,12 +88,29 @@ export type CoverageLookup = (fileName: string, range: SourceRange) => number | 
 /** A logger sink for targeting notes (coverage, Gate-2 skips). Defaults to no-op. */
 export type TargetLogger = (line: string) => void;
 
+/**
+ * A cache probe: true when the pre-pass call for this target would be a cache
+ * HIT. Must use the SAME key computation as the pre-pass (`proposeCacheIdentity`)
+ * — the driver builds it from one `ResponseCache.keys()` listing.
+ */
+export type CachedTargetProbe = (target: ProposeTarget) => boolean;
+
 /** Options for {@link buildProposeTargets}. */
 export interface BuildProposeTargetsOptions {
     /** Injected coverage probe; absent ⇒ no coverage signal (treat as eligible). */
     coverageLookup?: CoverageLookup;
     /** Note sink for coverage + Gate-2 aggregates. */
     log?: TargetLogger;
+    /**
+     * Injected cache probe; absent ⇒ every candidate is treated as UNCACHED (the
+     * legacy per-file cut + top-K apply to all of them).
+     */
+    isCached?: CachedTargetProbe;
+    /**
+     * Frozen (cache-only) mode: uncached candidates are skipped, since the
+     * budgeted provider would answer them with no candidates anyway. Default false.
+     */
+    frozen?: boolean;
 }
 
 /** Per-function scoring detail carried for logging + the diminishing-returns proxy. */
@@ -102,6 +127,8 @@ export interface TargetMeta {
     ev: number;
     /** Number of eligible sub-spans found in the function. */
     eligibleSpanCount: number;
+    /** True when the `isCached` probe reported a hit (a free target, never capped). */
+    cached: boolean;
 }
 
 /** The result of {@link buildProposeTargets}: the targets plus their meta. */
@@ -429,6 +456,38 @@ interface FunctionCandidate {
     semanticRichness: number;
     ev: number;
     eligibleSpanCount: number;
+    /** The function's name when it has one (declaration `id` / method `key`). */
+    functionName?: string;
+}
+
+/**
+ * The name of a function node when it carries one: a declaration's or
+ * expression's `id`, a method's `key` (identifier, string literal, or
+ * `#private` name). Arrow functions and anonymous expressions yield `undefined`.
+ * Provenance only (recorded on the cache entry) — never used for keys.
+ */
+function functionNameOf(fnNode: AnyNode): string | undefined {
+    const id = fnNode.id;
+    if (isNode(id) && id.type === 'Identifier' && typeof id.name === 'string') {
+        return id.name;
+    }
+    const key = fnNode.key;
+    if (!isNode(key)) {
+        return undefined;
+    }
+    if (key.type === 'Identifier' && typeof key.name === 'string') {
+        return key.name;
+    }
+    if (key.type === 'StringLiteral' && typeof key.value === 'string') {
+        return key.value;
+    }
+    if (key.type === 'PrivateName') {
+        const inner = key.id;
+        if (isNode(inner) && typeof inner.name === 'string') {
+            return `#${inner.name}`;
+        }
+    }
+    return undefined;
 }
 
 /**
@@ -457,7 +516,7 @@ function collectFunctions(root: AnyNode): AnyNode[] {
     return found;
 }
 
-/** Build the candidates for one file. */
+/** Build EVERY eligible candidate for one file, EV-descending (no per-file cut here). */
 function candidatesForFile(
     file: SourceFileInput,
     config: LlmMutatorConfig,
@@ -472,7 +531,7 @@ function candidatesForFile(
     const comments = (ast.comments ?? []) as unknown as AnyNode[];
     const disabled = findDisabledRanges(comments, file.content, file.content.length);
 
-    const { minRiskScore, requireCoverage, topSpansPerFile } = config.dynamicLLM.targeting;
+    const { minRiskScore, requireCoverage } = config.dynamicLLM.targeting;
     const candidates: FunctionCandidate[] = [];
 
     for (const fnNode of collectFunctions(program)) {
@@ -494,6 +553,7 @@ function candidatesForFile(
         }
         const spanStartOffset = (fnNode as { start?: number | null }).start ?? 0;
         const spanEndOffset = (fnNode as { end?: number | null }).end ?? 0;
+        const functionName = functionNameOf(fnNode);
         candidates.push({
             fileName: file.fileName,
             range,
@@ -505,12 +565,53 @@ function candidatesForFile(
             semanticRichness,
             ev: risk * semanticRichness,
             eligibleSpanCount: score.eligibleSpanCount,
+            ...(functionName === undefined ? {} : { functionName }),
         });
     }
 
-    // Keep the top `topSpansPerFile` highest-EV functions in this file.
     candidates.sort((a, b) => b.ev - a.ev);
-    return candidates.slice(0, topSpansPerFile);
+    return candidates;
+}
+
+/** Shape a scored candidate into the {@link ProposeTarget} the pre-pass consumes. */
+function toTarget(candidate: FunctionCandidate): ProposeTarget {
+    return {
+        fileName: candidate.fileName,
+        range: candidate.range,
+        spanText: candidate.functionText,
+        context: candidate.functionText,
+        fileContent: candidate.fileContent,
+        spanStartOffset: candidate.spanStartOffset,
+        spanEndOffset: candidate.spanEndOffset,
+        ...(candidate.functionName === undefined ? {} : { functionName: candidate.functionName }),
+    };
+}
+
+/** A candidate paired with its target + cache verdict, ready for selection. */
+interface ScoredTarget {
+    candidate: FunctionCandidate;
+    target: ProposeTarget;
+    cached: boolean;
+}
+
+/**
+ * Partition one file's EV-descending candidates into the cached ones (ALL kept)
+ * and the top `topSpansPerFile` uncached ones. With no probe, everything is
+ * uncached — the legacy per-file cut.
+ */
+function partitionFile(
+    candidates: readonly FunctionCandidate[],
+    topSpansPerFile: number,
+    isCached: CachedTargetProbe | undefined,
+): { cached: ScoredTarget[]; uncached: ScoredTarget[] } {
+    const cached: ScoredTarget[] = [];
+    const uncached: ScoredTarget[] = [];
+    for (const candidate of candidates) {
+        const target = toTarget(candidate);
+        const hit = isCached === undefined ? false : isCached(target);
+        (hit ? cached : uncached).push({ candidate, target, cached: hit });
+    }
+    return { cached, uncached: uncached.slice(0, topSpansPerFile) };
 }
 
 /** Coverage eligibility with the M3 "no signal ⇒ eligible (and log once)" rule. */
@@ -556,36 +657,47 @@ export function buildProposeTargets(
         );
     }
 
-    const all: FunctionCandidate[] = [];
+    const { topSpansPerFile } = config.dynamicLLM.targeting;
+    const cached: ScoredTarget[] = [];
+    const uncached: ScoredTarget[] = [];
     for (const file of files) {
-        all.push(...candidatesForFile(file, config, options));
+        const part = partitionFile(
+            candidatesForFile(file, config, options),
+            topSpansPerFile,
+            options.isCached,
+        );
+        cached.push(...part.cached);
+        uncached.push(...part.uncached);
     }
 
-    // Global EV ranking, then bound by the call budget (top-K).
-    all.sort((a, b) => b.ev - a.ev);
+    // Global EV ranking + the call-budget top-K bound the UNCACHED (paid) set
+    // only; every cached candidate rides along for free. Frozen mode issues no
+    // paid call at all, so its uncached candidates are dropped here.
+    uncached.sort((a, b) => b.candidate.ev - a.candidate.ev);
     const topK = config.dynamicLLM.budget.maxLlmCallsPerRun;
-    const chosen = all.slice(0, topK);
+    const frozen = options.frozen ?? false;
+    const chosenNew = frozen ? [] : uncached.slice(0, topK);
+    const chosen = [...cached, ...chosenNew].sort((a, b) => b.candidate.ev - a.candidate.ev);
 
     if (log !== undefined) {
-        log(`Gate1/2: ${String(chosen.length)} function target(s) selected for the LLM pre-pass`);
+        const tail = frozen
+            ? `frozen: ${String(uncached.length)} uncached skipped`
+            : `cap ${String(topK)}`;
+        log(
+            `Gate1/2: ${String(cached.length)} cached target(s) (free) + ` +
+                `${String(chosenNew.length)} new target(s) selected (${tail})`,
+        );
     }
 
-    const targets: ProposeTarget[] = chosen.map(candidate => ({
-        fileName: candidate.fileName,
-        range: candidate.range,
-        spanText: candidate.functionText,
-        context: candidate.functionText,
-        fileContent: candidate.fileContent,
-        spanStartOffset: candidate.spanStartOffset,
-        spanEndOffset: candidate.spanEndOffset,
-    }));
-    const meta: TargetMeta[] = chosen.map(candidate => ({
+    const targets: ProposeTarget[] = chosen.map(entry => entry.target);
+    const meta: TargetMeta[] = chosen.map(({ candidate, cached: hit }) => ({
         fileName: candidate.fileName,
         range: candidate.range,
         risk: candidate.risk,
         semanticRichness: candidate.semanticRichness,
         ev: candidate.ev,
         eligibleSpanCount: candidate.eligibleSpanCount,
+        cached: hit,
     }));
 
     return { targets, meta };

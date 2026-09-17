@@ -146,12 +146,17 @@ export async function runLlmMutation(
             );
         }
         const files = await readMutateSources(plan.projectDir, plan.strykerOptions.mutate);
+        // `cache` + `frozen` drive MONOTONE targeting: every already-cached
+        // function is always (freely) re-proposed; the caps bound only the new,
+        // paid ones.
         const built = await buildLlmMutator(config, {
             provider,
             costAccumulator: cost,
             files,
             cwd: resolve(plan.projectDir),
             log,
+            cache,
+            frozen,
         });
         plan.injectedMutators.push(built.mutator);
         costSnapshot = built.costSnapshot;

@@ -103,4 +103,41 @@ describe('ResponseCache', () => {
         expect((await cache.get<string>('k1'))?.value).toBe('one');
         expect((await cache.get<string>('k2'))?.value).toBe('two');
     });
+
+    it('round-trips the optional entry meta (fingerprint + provenance)', async () => {
+        const cache = new ResponseCache(dir);
+        const entry = {
+            value: { ok: true },
+            costUsd: 0.01,
+            model: 'm',
+            meta: { fingerprint: 'ab'.repeat(32), fileName: '/abs/a.ts', functionName: 'f' },
+        };
+        await cache.set('k', entry);
+        expect(await cache.get('k')).toEqual(entry);
+    });
+
+    it('reads a legacy entry without meta (tolerant of the old on-disk shape)', async () => {
+        const cache = new ResponseCache(dir);
+        await Bun.write(
+            join(dir, 'legacy.json'),
+            JSON.stringify({ value: { candidates: [] }, costUsd: 0.5, model: 'm' }),
+        );
+        const hit = await cache.get('legacy');
+        expect(hit?.value).toEqual({ candidates: [] });
+        expect(hit?.meta).toBeUndefined();
+    });
+
+    it('keys(): lists every stored key (one readdir, not one stat per probe)', async () => {
+        const cache = new ResponseCache(dir);
+        await cache.set('k1', { value: 'one', costUsd: 0, model: 'm' });
+        await cache.set('k2', { value: 'two', costUsd: 0, model: 'm' });
+        // A stray non-entry file is not a key.
+        await Bun.write(join(dir, 'README.txt'), 'not an entry');
+        expect([...(await cache.keys())].sort()).toEqual(['k1', 'k2']);
+    });
+
+    it('keys(): is empty when the cache directory does not exist yet', async () => {
+        const cache = new ResponseCache(join(dir, 'never-created'));
+        expect((await cache.keys()).size).toBe(0);
+    });
 });

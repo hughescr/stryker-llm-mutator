@@ -111,9 +111,10 @@ export const llmMutatorConfigSchema = z
             })
             .prefault({}),
         /**
-         * Directory for the content-addressed cache (key =
-         * SHA(model + prompt + file content + span)) that makes warm runs stable
-         * (development-plan §7 reproducibility). Relative paths resolve against
+         * Directory for the content-addressed cache (key = SHA(model + the
+         * function's structural fingerprint + candidate cap + system + schema))
+         * that makes warm runs stable (development-plan §7 reproducibility) and
+         * survives comment / formatting edits. Relative paths resolve against
          * the Stryker working directory.
          */
         cacheDir: z.string().min(1).default('.stryker-llm-cache'),

@@ -43,6 +43,12 @@ export { buildPromptModePrompt, extractJsonObject, validateAgainstSchema } from 
 
 export { MockProvider, type MockProviderOptions, type MockResponder } from './mock-provider';
 
-export { computeCacheKey, ResponseCache, type CacheEntry, type CacheKeyParts } from './cache';
+export {
+    computeCacheKey,
+    ResponseCache,
+    type CacheEntry,
+    type CacheEntryMeta,
+    type CacheKeyParts,
+} from './cache';
 
 export { CostAccumulator, type CostSnapshot } from './cost';

@@ -30,12 +30,15 @@ import {
     type CostAccumulator,
     type CostSnapshot,
     type LLMProvider,
+    type ResponseCache,
 } from '../llm/index';
 import {
     buildProposeTargets,
+    type CachedTargetProbe,
     type CoverageLookup,
     type SourceFileInput,
 } from '../pipeline/targeting';
+import { proposeCacheIdentity } from '../pipeline/propose';
 import { runPrePass, type PrePassLogger } from '../pipeline/prepass';
 import {
     buildLlmMutatorMap,
@@ -236,6 +239,18 @@ export interface BuildLlmMutatorDeps {
     coverageLookup?: CoverageLookup;
     /** Cooperative cancellation signal forwarded to the pre-pass. */
     signal?: AbortSignal;
+    /**
+     * The SAME response cache the budgeted `provider` reads. When given, its key
+     * listing drives MONOTONE targeting: every eligible function already cached
+     * is always targeted (free), and the per-file / per-run caps bound only the
+     * uncached ones. Absent ⇒ legacy targeting (every candidate counts as new).
+     */
+    cache?: ResponseCache;
+    /**
+     * Frozen (cache-only) mode: uncached functions are not targeted at all (the
+     * provider would answer them with no candidates). Default false.
+     */
+    frozen?: boolean;
 }
 
 /** The outcome of {@link buildLlmMutator}: the injected mutator + run metadata. */
@@ -275,11 +290,14 @@ export async function buildLlmMutator(
     cfg: LlmMutatorConfig,
     deps: BuildLlmMutatorDeps,
 ): Promise<BuildLlmMutatorResult> {
-    const { provider, files, cwd, log, coverageLookup, signal } = deps;
+    const { provider, files, cwd, log, coverageLookup, signal, cache, frozen } = deps;
 
+    const isCached = cache === undefined ? undefined : await cachedTargetProbe(cache, cfg);
     const { targets } = buildProposeTargets(files, cfg, {
         ...(log === undefined ? {} : { log }),
         ...(coverageLookup === undefined ? {} : { coverageLookup }),
+        ...(isCached === undefined ? {} : { isCached }),
+        ...(frozen === undefined ? {} : { frozen }),
     });
 
     // The cost accumulator lives inside the budgeted provider; the pre-pass reads
@@ -310,6 +328,22 @@ export async function buildLlmMutator(
         costSnapshot: prePass.cost,
         droppedLog: dropped,
     };
+}
+
+/**
+ * Build the targeting stage's cache probe from ONE directory listing of the
+ * response cache: a target is "cached" when the exact key the pre-pass will
+ * compute for it (`proposeCacheIdentity`, same model + candidate cap) is
+ * present. One `readdir`, then a Set lookup per candidate — never a stat each.
+ */
+async function cachedTargetProbe(
+    cache: ResponseCache,
+    cfg: LlmMutatorConfig,
+): Promise<CachedTargetProbe> {
+    const keys = await cache.keys();
+    const { maxCandidatesPerFile } = cfg.dynamicLLM.budget;
+    return target =>
+        keys.has(proposeCacheIdentity(target, cfg.model, maxCandidatesPerFile).cacheKey);
 }
 
 /** Count total candidate entries across the two-level map. */

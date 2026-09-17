@@ -7,9 +7,14 @@
 export {
     propose,
     PROPOSE_MUTATOR_PREFIX,
+    proposeCacheIdentity,
+    type ProposeCacheIdentity,
     type ProposeOptions,
     type ProposeTarget,
 } from './propose';
+
+// ── Structural function fingerprint + comment stripper (cache identity) ──────
+export { functionFingerprint, stripComments } from './fingerprint';
 
 export {
     applyFilters,
@@ -48,6 +53,7 @@ export {
     type BuildProposeTargetsOptions,
     type BuildProposeTargetsResult,
     buildProposeTargets,
+    type CachedTargetProbe,
     type CoverageLookup,
     isLlmWorthy,
     RICHNESS_BOOST,

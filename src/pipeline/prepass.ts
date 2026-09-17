@@ -21,6 +21,12 @@
  * `mutatorTag`s — exactly the candidate/diversity yield the doc specifies. Actual
  * survivor counts come back in Stryker's `MutantResult[]` and feed the NEXT run's
  * targeting.
+ *
+ * PAID vs FREE: every target is keyed by its function FINGERPRINT
+ * (`propose.ts` `proposeCacheIdentity`), so a cache HIT is a free, instant
+ * re-proposal. Only PAID (uncached) calls advance `callsIssued` and the
+ * diminishing-returns window — thousands of free hits (every cached function
+ * rides along) can neither trip the stop rule nor look like spend.
  */
 
 import { basename } from 'node:path';
@@ -28,7 +34,7 @@ import { basename } from 'node:path';
 import { applyFilters, dedupKey } from './filters';
 import { filterNearEquivalent } from './near-equivalence';
 import { type DroppedReplacement } from './llm-map';
-import { propose, type ProposeResult, type ProposeTarget } from './propose';
+import { propose, proposeCacheIdentity, type ProposeResult, type ProposeTarget } from './propose';
 import type { AlignDropReason } from './range-align';
 import { BudgetExceededError } from './budgeted-provider';
 import type { CostAccumulator, CostSnapshot, LLMProvider } from '../llm/index';
@@ -65,7 +71,7 @@ export interface RunPrePassResult {
     dropped: DroppedReplacement[];
     /** Why the pre-pass halted. */
     stopReason: PrePassStopReason;
-    /** How many propose() calls were issued. */
+    /** How many PAID propose() calls were issued (cache hits are not counted). */
     callsIssued: number;
 }
 
@@ -145,7 +151,7 @@ function filterCall(raw: readonly Replacement[]): {
 function logHeartbeat(
     log: PrePassLogger | undefined,
     info: {
-        callsIssued: number;
+        processed: number;
         total: number;
         target: ProposeTarget;
         newThisCall: number;
@@ -158,7 +164,7 @@ function logHeartbeat(
     }
     const { totalUsd } = info.cost.snapshot();
     log(
-        `stryker-llm: pre-pass [${String(info.callsIssued)}/${String(info.total)}] ` +
+        `stryker-llm: pre-pass [${String(info.processed)}/${String(info.total)}] ` +
             `${basename(info.target.fileName)}:${String(info.target.range.start.line + 1)} — ` +
             `+${String(info.newThisCall)} cand, ${String(info.survivors)} total, ` +
             `$${totalUsd.toFixed(2)}`,
@@ -242,7 +248,9 @@ interface PrePassState {
     seenIdentities: Set<string>;
     seenTags: Set<string>;
     rolling: RollingYield;
-    /** Bumped once per processed SUCCESSFUL result, mirroring the old per-call counter. */
+    /** Bumped once per processed SUCCESSFUL result (the heartbeat's position). */
+    processed: number;
+    /** Bumped once per processed PAID result (cache hits excluded). */
     callsIssued: number;
 }
 
@@ -268,7 +276,10 @@ function processProposeResult(
     },
 ): PrePassStopReason | undefined {
     const { log, diminishingReturns } = ctx;
-    state.callsIssued += 1;
+    state.processed += 1;
+    if (!proposed.cached) {
+        state.callsIssued += 1;
+    }
 
     // Node-alignment drops (not-found / ambiguous / non-node-aligned /
     // not-an-expression / not-expression-placeable) join the run's drop log for the JSON report. Their
@@ -297,14 +308,19 @@ function processProposeResult(
         }
     }
 
-    state.rolling.push(newThisCall);
+    // Only a PAID call is a sample for the diminishing-returns window: a free
+    // hit re-yields whatever it yielded when it was bought, which says nothing
+    // about whether the NEXT dollar is worth spending.
+    if (!proposed.cached) {
+        state.rolling.push(newThisCall);
+    }
 
     // Per-call PROGRESS HEARTBEAT: one compact line so a long cold-cache
     // run shows liveness + running cost instead of sitting silent between
     // the Gate1/2 line and the final summary. Purely additive — no control
     // flow depends on it. `cost.snapshot()` just reads two fields (cheap).
     logHeartbeat(log, {
-        callsIssued: state.callsIssued,
+        processed: state.processed,
         total: ctx.total,
         target,
         newThisCall,
@@ -366,6 +382,7 @@ export async function runPrePass(
         seenIdentities: new Set<string>(),
         seenTags: new Set<string>(),
         rolling: new RollingYield(diminishingReturns.window),
+        processed: 0,
         callsIssued: 0,
     };
     const ctx = { total: targets.length, cost, log, diminishingReturns };
@@ -377,13 +394,23 @@ export async function runPrePass(
         const wave = targets.slice(i, i + parallelBatches);
         // oxlint-disable-next-line no-await-in-loop -- waves are sequential by design: ceiling + diminishing-returns are evaluated per wave.
         const settled = await Promise.allSettled(
-            wave.map(t =>
-                propose(provider, t, {
+            wave.map(t => {
+                // Fingerprint-keyed cache identity: the SAME computation the
+                // targeting stage's `isCached` probe uses, so "cached" there means
+                // "hit" here.
+                const { cacheKey, meta } = proposeCacheIdentity(
+                    t,
+                    config.model,
+                    budget.maxCandidatesPerFile,
+                );
+                return propose(provider, t, {
                     maxCandidates: budget.maxCandidatesPerFile,
                     model: config.model,
+                    cacheKey,
+                    cacheMeta: meta,
                     ...(signal === undefined ? {} : { signal }),
-                }),
-            ),
+                });
+            }),
         );
         // Re-pair each settled outcome with its target so processing stays in
         // ARRAY ORDER without an out-of-band index (settled is index-aligned to

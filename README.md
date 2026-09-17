@@ -144,9 +144,23 @@ Everything lives under `llmMutator`. Both switches default such that an empty `l
 | `dynamicLLM.parallelBatches` | `1` | Number of Haiku requests issued concurrently per wave; >1 speeds cold runs (see caveats). |
 | `provider` | `anthropic-agent-sdk` | LLM provider (only `anthropic-agent-sdk` + `mock` implemented today). |
 | `model` | `haiku` | Model id or alias. |
-| `cacheDir` | `.stryker-llm-cache` | Content‑addressed cache. Commit/restore it for warm, free CI runs. |
+| `cacheDir` | `.stryker-llm-cache` | Content‑addressed cache keyed by each function's structural fingerprint. Commit/restore it for warm, free CI runs. |
 
 `haiku` follows Anthropic's current Haiku alias for fresh requests. The cache key records the requested alias, so existing cached responses remain reusable if that alias later resolves to a newer model snapshot; clear the cache or set a different explicit model when you want to force fresh responses.
+
+### The response cache: fingerprint keys + monotone targeting
+
+Each `propose()` call is cached under `SHA‑256(model, "fp:<fingerprint>|max:<candidate cap>", system prompt, schema)`, where **`<fingerprint>` is a canonical‑AST digest of the function** (`src/pipeline/fingerprint.ts`) rather than its verbatim text. The digest drops every positional and formatting artefact — comments anywhere (including `// Stryker disable …`), whitespace/indentation, literal spelling (`0xFF` vs `255`, quote style, template escapes), trailing commas, redundant parentheses — and keeps every identifier, literal **value**, operator and the tree shape (`(a + b) * c` ≠ `a + b * c`). So a comment or reformatting edit is a cache **hit** (the same proposals, `$0`), while any behavioural edit is a miss. The model is also shown the comment‑stripped function text, so comments cannot steer the proposals. New entries carry a `meta` block (`fingerprint`, `fileName`, `functionName`) for provenance; older entries without it still read fine.
+
+Targeting is **monotone** over that cache: every eligible function already cached is always re‑proposed (free, fast, never counted against `maxLlmCallsPerRun` or the diminishing‑returns window), and `topSpansPerFile` / `maxLlmCallsPerRun` bound only the **new** (paid) functions ranked by EV. The pre‑pass logs the split: `Gate1/2: N cached target(s) (free) + M new target(s) selected (cap K)`. Net effect: the LLM mutant set grows run‑over‑run instead of drifting as EV ranks shuffle functions in and out of a fixed window.
+
+**Upgrading from ≤ 1.2.1 (verbatim‑prompt keys):** existing entries would all miss under the new key. Migrate them offline (`$0`, no network) **before** the next unfrozen run:
+
+```bash
+bun scripts/migrate-cache-fingerprint.ts --project /path/to/project [--config stryker.config.json] [--mutate 'src/**/*.ts']... [--dry-run]
+```
+
+It rebuilds every legacy request from the project's sources (a frozen copy of the 1.2.1 prompt lives in the script), and for each function whose legacy entry exists and whose fingerprint entry does not, copies it under the new key with `meta` added; it prints `scanned / migrated / already present / missing`. A JS config that calls `withLlmMutators()` is deliberately **not** imported (that would run a live pre‑pass) — it is skipped with a note and the schema defaults apply; pass a `.json` config if your `llmMutator` block overrides `model`, `cacheDir` or `budget.maxCandidatesPerFile`. Legacy files are left in place. Only functions whose source is unchanged since their entry was bought can match — exactly the set that would have hit anyway.
 
 **On `dynamicLLM.parallelBatches`.** Default `1` is the original strictly sequential pre‑pass. Raising it slices the EV‑ranked targets into consecutive waves of that size and fires a whole wave of Haiku `propose()` calls at once, which overlaps the model round‑trips and speeds up **cold** (cache‑miss) runs. Honest, bounded tradeoffs: the hard `maxCostUsd`/`maxLlmCallsPerRun` ceilings can **overshoot by up to `parallelBatches − 1` calls** (that many may be in flight when a ceiling trips — they're only checked between calls), the diminishing‑returns stop is evaluated **per wave** so it may run up to `parallelBatches − 1` calls past the sequential stop point, and very high values may hit the provider's **API rate limits**. There is no hard maximum — pick a value your quota tolerates.
 

@@ -18,7 +18,8 @@ import {
 import { CostAccumulator, MockProvider, ResponseCache } from '../../src/llm/index';
 import { createBudgetedProvider } from '../../src/pipeline/budgeted-provider';
 import { LLM_MUTATOR_NAME } from '../../src/mutators/llm-mutator';
-import type { SourceFileInput } from '../../src/pipeline/targeting';
+import { proposeCacheIdentity } from '../../src/pipeline/propose';
+import { buildProposeTargets, type SourceFileInput } from '../../src/pipeline/targeting';
 
 /** Parse a partial llmMutator block into the fully-defaulted config. */
 function config(partial: Record<string, unknown>): LlmMutatorConfig {
@@ -229,6 +230,145 @@ function classify(items, threshold) {
             });
 
             expect(lines.some(l => l.includes('LLM pre-pass:'))).toBe(true);
+        });
+    });
+
+    describe('cache-aware (monotone) targeting', () => {
+        /** A second rich function so there are two targets competing for one paid slot. */
+        const RICH_FN_B = RICH_FN.replace('function classify(', 'function classifyB(').replace(
+            'count >= 2',
+            'count >= 3',
+        );
+        const twoFiles = (): SourceFileInput[] => [
+            { fileName: '/abs/classify.ts', content: RICH_FN },
+            { fileName: '/abs/classify-b.ts', content: RICH_FN_B },
+        ];
+        const oneNewCall = () =>
+            config({
+                provider: 'mock',
+                model: 'haiku',
+                dynamicLLM: { enabled: true, budget: { maxLlmCallsPerRun: 1 } },
+            });
+        const responder = () => ({
+            candidates: [
+                {
+                    original: 'count = count + 1',
+                    replacement: 'count = count - 1',
+                    mutatorTag: 'dec',
+                    rationale: 'r',
+                },
+            ],
+        });
+
+        /** Pre-seed the cache with the EXACT entry the pre-pass would write for `classify`. */
+        async function seedClassify(cache: ResponseCache, cfg: LlmMutatorConfig): Promise<void> {
+            const { targets } = buildProposeTargets(twoFiles(), cfg);
+            const a = targets.find(t => t.fileName === '/abs/classify.ts')!;
+            const { cacheKey, meta } = proposeCacheIdentity(
+                a,
+                cfg.model,
+                cfg.dynamicLLM.budget.maxCandidatesPerFile,
+            );
+            await cache.set(cacheKey, { value: responder(), costUsd: 0.02, model: 'haiku', meta });
+        }
+
+        it('with a `cache` dep, cached functions ride free ABOVE the call cap and new ones fill it', async () => {
+            await withTempCache(async cache => {
+                const cfg = oneNewCall();
+                await seedClassify(cache, cfg);
+                const cost = new CostAccumulator();
+                const inner = new MockProvider({ responder, costUsd: 0.02 });
+                const provider = createBudgetedProvider(inner, {
+                    cache,
+                    cost,
+                    maxCostUsd: 5,
+                    maxLlmCallsPerRun: 1,
+                    defaultModel: 'haiku',
+                });
+                const lines: string[] = [];
+
+                const result = await buildLlmMutator(cfg, {
+                    provider,
+                    costAccumulator: cost,
+                    files: twoFiles(),
+                    cwd: '/abs',
+                    cache,
+                    log: l => lines.push(l),
+                });
+
+                expect(lines).toContain(
+                    'Gate1/2: 1 cached target(s) (free) + 1 new target(s) selected (cap 1)',
+                );
+                // ONE paid call (classifyB); classify came from the cache — and BOTH
+                // files land in the map.
+                expect(inner.calls).toHaveLength(1);
+                expect(result.map.size).toBe(2);
+            });
+        });
+
+        it('without a `cache` dep every function is "new" and the cap bites (legacy)', async () => {
+            await withTempCache(async cache => {
+                const cfg = oneNewCall();
+                await seedClassify(cache, cfg);
+                const cost = new CostAccumulator();
+                const inner = new MockProvider({ responder, costUsd: 0.02 });
+                const provider = createBudgetedProvider(inner, {
+                    cache,
+                    cost,
+                    maxCostUsd: 5,
+                    maxLlmCallsPerRun: 1,
+                    defaultModel: 'haiku',
+                });
+                const lines: string[] = [];
+
+                const result = await buildLlmMutator(cfg, {
+                    provider,
+                    costAccumulator: cost,
+                    files: twoFiles(),
+                    cwd: '/abs',
+                    log: l => lines.push(l),
+                });
+
+                expect(lines).toContain(
+                    'Gate1/2: 0 cached target(s) (free) + 1 new target(s) selected (cap 1)',
+                );
+                expect(result.map.size).toBe(1);
+            });
+        });
+
+        it('frozen: only the cached function is targeted; the uncached one is skipped and logged', async () => {
+            await withTempCache(async cache => {
+                const cfg = oneNewCall();
+                await seedClassify(cache, cfg);
+                const cost = new CostAccumulator();
+                const inner = new MockProvider({ responder, costUsd: 0.02 });
+                const provider = createBudgetedProvider(inner, {
+                    cache,
+                    cost,
+                    maxCostUsd: 5,
+                    maxLlmCallsPerRun: 1,
+                    defaultModel: 'haiku',
+                    cacheOnly: true,
+                });
+                const lines: string[] = [];
+
+                const result = await buildLlmMutator(cfg, {
+                    provider,
+                    costAccumulator: cost,
+                    files: twoFiles(),
+                    cwd: '/abs',
+                    cache,
+                    frozen: true,
+                    log: l => lines.push(l),
+                });
+
+                expect(lines).toContain(
+                    'Gate1/2: 1 cached target(s) (free) + 0 new target(s) selected (frozen: 1 uncached skipped)',
+                );
+                expect(inner.calls).toHaveLength(0);
+                expect(result.map.size).toBe(1);
+                expect(result.costSnapshot.totalUsd).toBe(0);
+            });
         });
     });
 });

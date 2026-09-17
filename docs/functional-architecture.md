@@ -317,8 +317,12 @@ we **do not present a comparable-looking score** (§6, and risks below).
   different candidates run-to-run — which changes WHICH `llm` mutants exist, the
   blended score, and the survivor set. The heuristic mutators are fully
   deterministic (pure AST); only the dynamicLLM path is non-deterministic, and only
-  on cache MISSES. A content-addressed cache (key = `SHA256(model + prompt +
-  stableStringify(schema))`) makes a WARM run (every targeted call already cached)
+  on cache MISSES. A content-addressed cache (key = `SHA256(model +
+  "fp:<function fingerprint>|max:<candidate cap>" + system + stableStringify(schema))`,
+  where the fingerprint is a canonical-AST digest of the function — see
+  `src/pipeline/fingerprint.ts`; comments, whitespace, literal spelling, trailing
+  commas and redundant parens do NOT change it, any identifier / literal value /
+  operator / structure edit does) makes a WARM run (every targeted call already cached)
   byte-for-byte reproducible and free: the budgeted provider's cache-hit branch
   reconstructs the identical validated value at `costUsd:0`/`cached:true` and never
   calls the model. So **reproducibility == cache coverage**. For a deterministic,
@@ -397,7 +401,13 @@ span (author-vetted equivalents, deprioritize). **Eligibility (the CUT version):
 `risk ≥ minRiskScore`.** Rank eligible spans by `EV = risk · semanticRichness`,
 where `semanticRichness` boosts spans with ≥2 distinct operators / object-array
 construction / multi-arg calls (where single-token formulaic swaps under-cover).
-Keep `topSpansPerFile` (default 10) and a global top-K under the ceiling.
+Keep `topSpansPerFile` (default 10) and a global top-K under the ceiling — for the
+UNCACHED candidates only. **Monotone selection:** every eligible function whose
+proposals are already in the response cache (probed with the same fingerprint key
+the pre-pass uses) is ALWAYS targeted — a hit is free and instant — so the mutant
+set can only grow run-over-run instead of drifting as EV ranks shuffle functions in
+and out of a fixed window. The call cap and the diminishing-returns window count
+only PAID calls. In frozen mode the uncached candidates are skipped outright.
 
 **GATE 2 — COMPLEMENTARITY HAND-OFF (heuristics first).** Heuristics run inside
 Stryker for free (zero LLM spend). The LLM pre-pass is invoked only on
@@ -426,8 +436,9 @@ false-drop literal-format changes that may be semantically meaningful). Only
 survivors are pre-parsed into AST nodes and entered into the
 `(fileName, node-location) → Node[]` map the `LLMMutator` reads. Content-address
 every LLM call via the existing `ResponseCache`
-(`computeCacheKey = SHA256(model+prompt+schema)`); re-runs and overlapping spans
-are free.
+(`computeCacheKey = SHA256(model + "fp:<fingerprint>|max:<cap>" + system + schema)`,
+the fingerprint being the function's structural digest); re-runs, comment-only or
+formatting-only edits, and overlapping spans are free.
 
 **STOPPING.** Halt the pre-pass when ANY of: (1) global cost ≥
 `budget.maxCostUsd`; (2) EV queue exhausted; (3) diminishing returns — rolling

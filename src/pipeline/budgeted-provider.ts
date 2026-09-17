@@ -13,10 +13,17 @@
  * already collected (a partial map still drives a useful Stryker run).
  *
  * Content-addressing: every call is keyed by `req.cacheKey ?? computeCacheKey(
- * {model, prompt, system, schema})`. A cache HIT reconstructs a `ProviderResult` with
- * `costUsd: 0, cached: true`, records a zero-cost call (so the call COUNT still
- * advances), and never hits the network — so warm re-runs and overlapping spans
- * are free. A MISS delegates, then records the real cost and stores the entry.
+ * {model, prompt, system, schema})` (the pre-pass supplies a FINGERPRINT-derived
+ * `cacheKey` — see `propose.ts` `proposeCacheIdentity`). A cache HIT reconstructs
+ * a `ProviderResult` with `costUsd: 0, cached: true`, records a zero-cost call
+ * (so the accumulator's call COUNT still advances), and never hits the network —
+ * so warm re-runs and overlapping spans are free. A MISS delegates, then records
+ * the real cost and stores the entry (with the request's `cacheMeta` provenance).
+ *
+ * The CALL CAP (`maxLlmCallsPerRun`) counts only PAID calls — the ones that
+ * reached the inner provider. Free hits are unbounded by design: every cached
+ * function is always re-proposed for free (targeting includes them all), and
+ * that may be far more than the cap, which bounds SPEND, not work.
  *
  * FROZEN-SET MODE (`cacheOnly: true`, functional-architecture §3.4 / §7 CI
  * gating). When set, the wrapper NEVER reaches the network: a HIT behaves exactly
@@ -106,6 +113,8 @@ export function createBudgetedProvider(
 ): LLMProvider {
     const { cache, cost, maxCostUsd, maxLlmCallsPerRun, defaultModel, log } = options;
     const cacheOnly = options.cacheOnly ?? false;
+    /** Calls that reached the inner provider — the only ones the call cap counts. */
+    let paidCalls = 0;
 
     return {
         name: `${cacheOnly ? 'frozen' : 'budgeted'}(${inner.name})`,
@@ -154,10 +163,11 @@ export function createBudgetedProvider(
             if (snapshot.totalUsd >= maxCostUsd) {
                 throw new BudgetExceededError('maxCostUsd', snapshot);
             }
-            if (snapshot.calls >= maxLlmCallsPerRun) {
+            if (paidCalls >= maxLlmCallsPerRun) {
                 throw new BudgetExceededError('maxLlmCallsPerRun', snapshot);
             }
 
+            paidCalls += 1;
             const result = await inner.generate<T>(request);
             cost.add(result.costUsd);
 
@@ -166,6 +176,7 @@ export function createBudgetedProvider(
                 costUsd: result.costUsd,
                 model: result.model,
                 ...(result.rawText === undefined ? {} : { rawText: result.rawText }),
+                ...(request.cacheMeta === undefined ? {} : { meta: request.cacheMeta }),
             };
             await cache.set<T>(key, entry);
 

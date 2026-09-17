@@ -25,8 +25,10 @@
  * mis-aligned range anyway — functional-architecture §4 Gate 4 / §5 constraint 3).
  */
 
+import { functionFingerprint, stripComments } from './fingerprint';
 import { type AlignDropReason, alignCandidateRange } from './range-align';
 import type { DroppedReplacement } from './llm-map';
+import { type CacheEntryMeta, computeCacheKey } from '../llm/cache';
 import type { JsonSchema, LLMProvider, ProviderResult } from '../llm/types';
 import type { Replacement, SourceRange } from '../seam/types';
 
@@ -81,6 +83,12 @@ export interface ProposeTarget {
      * (exclusive). Defaults to the length of the resolved file source.
      */
     spanEndOffset?: number;
+    /**
+     * The function's name when it has one (a declaration's `id`, a method's
+     * `key`); absent for anonymous / arrow functions. Provenance only — it is
+     * recorded on the cache entry's `meta`, never used for positions or keys.
+     */
+    functionName?: string;
 }
 
 /**
@@ -99,6 +107,8 @@ export interface ProposeOptions {
     model?: string;
     /** Optional content-addressed cache-key hint forwarded to the provider. */
     cacheKey?: string;
+    /** Optional cache-entry provenance forwarded to the provider alongside `cacheKey`. */
+    cacheMeta?: CacheEntryMeta;
     /** Optional cooperative cancellation signal forwarded to the provider. */
     signal?: AbortSignal;
 }
@@ -188,30 +198,83 @@ const PROPOSE_SYSTEM = [
     'Return ONLY the structured object; no prose outside it.',
 ].join('\n');
 
-/** Build the per-function user prompt embedding the function text and context. */
+/**
+ * Build the per-function user prompt embedding the function text and context.
+ * Both are COMMENT-STRIPPED (`./fingerprint` `stripComments`) so a comment edit
+ * — a `// Stryker disable`, a doc tweak — can neither steer the proposals nor
+ * change the request; all other whitespace is preserved so the model's verbatim
+ * `original` sub-expressions still locate inside the real source.
+ */
 function buildProposePrompt(target: ProposeTarget, maxCandidates: number): string {
+    const functionText = stripComments(target.spanText);
     const parts = [
         `Propose up to ${maxCandidates} distinct, behavior-changing mutations, each on a small sub-expression WITHIN the FUNCTION below.`,
         '',
         'FUNCTION (mutate sub-expressions inside this; "original" must be a verbatim substring of it):',
         '```',
-        target.spanText,
+        functionText,
         '```',
     ];
-    if (
-        target.context !== undefined &&
-        target.context.length > 0 &&
-        target.context !== target.spanText
-    ) {
+    const context = target.context === undefined ? undefined : stripComments(target.context);
+    if (context !== undefined && context.length > 0 && context !== functionText) {
         parts.push(
             '',
             'CONTEXT (for understanding only; do NOT mutate outside the FUNCTION):',
             '```',
-            target.context,
+            context,
             '```',
         );
     }
     return parts.join('\n');
+}
+
+/**
+ * The cache identity of one propose call: the content-addressed key the
+ * budgeted provider files the response under, plus the provenance `meta`
+ * written onto a NEW entry. This is the ONE place the key is computed — the
+ * pre-pass (to issue the call) and the targeting stage's `isCached` probe (to
+ * decide which functions are free) must agree byte-for-byte, so both call this.
+ */
+export interface ProposeCacheIdentity {
+    /** The `ProviderRequest.cacheKey` for this target. */
+    cacheKey: string;
+    /** The `CacheEntry.meta` provenance to record on a new entry. */
+    meta: CacheEntryMeta;
+}
+
+/**
+ * Compute the {@link ProposeCacheIdentity} for a target. The key goes through
+ * the same `computeCacheKey(model, prompt, system, schema)` digest as before,
+ * but the `prompt` slot holds `fp:<fingerprint>|max:<maxCandidates>` — the
+ * STRUCTURAL fingerprint of the function (`./fingerprint`) rather than its
+ * verbatim text — so comment / whitespace / literal-spelling edits keep hitting
+ * the same entry, while the model, the system instructions, the schema and the
+ * candidate cap still change it (they change what the model was asked to do).
+ *
+ * @param target The enclosing-function target (only `spanText`, `fileName`, `functionName` are read).
+ * @param model The requested model id or alias (the same string the provider is given).
+ * @param maxCandidates The per-call candidate cap (shapes both the prompt and the schema).
+ */
+export function proposeCacheIdentity(
+    target: ProposeTarget,
+    model: string,
+    maxCandidates: number = DEFAULT_MAX_CANDIDATES,
+): ProposeCacheIdentity {
+    const fingerprint = functionFingerprint(target.spanText);
+    const cacheKey = computeCacheKey({
+        model,
+        prompt: `fp:${fingerprint}|max:${String(maxCandidates)}`,
+        system: PROPOSE_SYSTEM,
+        schema: buildProposeSchema(maxCandidates),
+    });
+    return {
+        cacheKey,
+        meta: {
+            fingerprint,
+            fileName: target.fileName,
+            ...(target.functionName === undefined ? {} : { functionName: target.functionName }),
+        },
+    };
 }
 
 /** The seam-ready replacements + the candidates dropped during node-alignment. */
@@ -220,6 +283,12 @@ export interface ProposeResult {
     replacements: Replacement[];
     /** Candidates dropped because their `original` could not be node-aligned. */
     dropped: DroppedReplacement[];
+    /**
+     * True when the provider served this call from its cache (a free hit) rather
+     * than a paid model call. The pre-pass counts only PAID calls toward its
+     * call tally and diminishing-returns window.
+     */
+    cached: boolean;
     /**
      * Per-TYPED-reason tally of the node-alignment drops in {@link dropped}. The
      * typed {@link AlignDropReason} is lost once each drop is flattened into the
@@ -365,6 +434,7 @@ export async function propose(
         system: PROPOSE_SYSTEM,
         model: options.model,
         cacheKey: options.cacheKey,
+        cacheMeta: options.cacheMeta,
         signal: options.signal,
     });
 
@@ -381,5 +451,5 @@ export async function propose(
             replacements.push(mapped);
         }
     }
-    return { replacements, dropped, dropCounts };
+    return { replacements, dropped, dropCounts, cached: result.cached ?? false };
 }

@@ -7,7 +7,9 @@
  * the SHA-256 of `(model + prompt + system + serialized schema)`, so a WARM run returns
  * the exact same validated object it returned before and the mutation score is
  * stable. A COLD run on a changed span may differ — that is documented and
- * expected.
+ * expected. The pre-pass fills the `prompt` slot with the function's STRUCTURAL
+ * fingerprint (`src/pipeline/propose.ts` `proposeCacheIdentity`), not its
+ * verbatim text, so comment / formatting edits keep hitting the same entry.
  *
  * This module is PURE and OFFLINE: it only touches the filesystem under the
  * configured cache directory and never makes a network call, so it is fully
@@ -15,7 +17,7 @@
  */
 
 import { createHash } from 'node:crypto';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 
 /**
@@ -40,6 +42,22 @@ export interface CacheKeyParts {
 }
 
 /**
+ * Provenance recorded on entries written under the FINGERPRINT-keyed scheme
+ * (`src/pipeline/fingerprint.ts`). Purely informational — the key is still the
+ * request's `cacheKey` — but it lets a human (or a migration) tell which
+ * function an entry belongs to without recomputing anything. Absent on entries
+ * written by older versions; readers must tolerate that.
+ */
+export interface CacheEntryMeta {
+    /** The structural fingerprint of the function text the entry was proposed for. */
+    fingerprint: string;
+    /** The absolute file the function lived in when the entry was written. */
+    fileName?: string;
+    /** The function's name when it has one (declarations, methods). */
+    functionName?: string;
+}
+
+/**
  * The on-disk shape of one cached entry. Stores the validated value plus the
  * call metadata reporting needs so a cache hit reconstructs a full result
  * without a fresh model call.
@@ -53,6 +71,8 @@ export interface CacheEntry<T = unknown> {
     model: string;
     /** Raw model text before parsing, when the original call exposed it. */
     rawText?: string;
+    /** Fingerprint provenance; written on new entries, absent on legacy ones. */
+    meta?: CacheEntryMeta;
 }
 
 /**
@@ -145,6 +165,28 @@ export class ResponseCache {
         const filePath = this.#pathForKey(key);
         await mkdir(dirname(filePath), { recursive: true });
         await writeFile(filePath, `${JSON.stringify(entry, null, 4)}\n`, 'utf8');
+    }
+
+    /**
+     * Every key currently stored: ONE directory listing (not a stat per probe),
+     * so a caller that must ask "is this target cached?" for thousands of
+     * targets does it against an in-memory set. An absent cache directory is an
+     * empty set. Only `<key>.json` files count; other files are ignored.
+     */
+    async keys(): Promise<Set<string>> {
+        let names: string[];
+        try {
+            names = await readdir(this.#dir);
+        } catch {
+            return new Set();
+        }
+        const keys = new Set<string>();
+        for (const name of names) {
+            if (name.endsWith('.json')) {
+                keys.add(name.slice(0, -'.json'.length));
+            }
+        }
+        return keys;
     }
 
     /**

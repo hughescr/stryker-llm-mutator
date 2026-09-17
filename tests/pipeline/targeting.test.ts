@@ -402,3 +402,178 @@ describe('buildProposeTargets — empty / multi-file', () => {
         expect(targets.length).toBeGreaterThanOrEqual(0);
     });
 });
+
+describe('buildProposeTargets — monotone selection (cached targets are always free)', () => {
+    /** Build `n` distinct rich functions (each a copy of RICH_FN with a unique name + literal). */
+    function richFunctions(n: number, prefix = 'fn'): string {
+        const fns: string[] = [];
+        for (let i = 0; i < n; i++) {
+            fns.push(
+                RICH_FN.replace('function classify(', `function ${prefix}${String(i)}(`).replace(
+                    'count >= 2',
+                    `count >= ${String(i + 2)}`,
+                ),
+            );
+        }
+        return fns.join('\n');
+    }
+
+    /** Parse a dynamicLLM config with targeting + budget overrides. */
+    function cfgWith(targeting: Record<string, unknown>, budget: Record<string, unknown>) {
+        return llmMutatorConfigSchema.parse({ dynamicLLM: { enabled: true, targeting, budget } });
+    }
+
+    it('keeps EVERY cached candidate even beyond maxLlmCallsPerRun (the cap bounds spend, not hits)', () => {
+        const { targets, meta } = buildProposeTargets(
+            [file('/abs/many.ts', richFunctions(6))],
+            cfgWith({ topSpansPerFile: 100 }, { maxLlmCallsPerRun: 2 }),
+            { isCached: () => true },
+        );
+        expect(targets).toHaveLength(6);
+        expect(meta.every(m => m.cached)).toBe(true);
+    });
+
+    it('applies maxLlmCallsPerRun to UNCACHED candidates only (cached + top-K new)', () => {
+        // 6 rich functions; fn0..fn2 are cached, fn3..fn5 are new; cap = 1 new.
+        const { targets, meta } = buildProposeTargets(
+            [file('/abs/many.ts', richFunctions(6))],
+            cfgWith({ topSpansPerFile: 100 }, { maxLlmCallsPerRun: 1 }),
+            { isCached: t => /function fn[0-2]\(/.test(t.spanText) },
+        );
+        expect(targets).toHaveLength(4);
+        expect(meta.filter(m => m.cached)).toHaveLength(3);
+        expect(meta.filter(m => !m.cached)).toHaveLength(1);
+        // The one new slot goes to the highest-EV uncached function (fn5 has the
+        // largest `count >= N` literal but identical risk → any of fn3..5 ties;
+        // assert it is one of the uncached ones, not a cached one).
+        const chosenNew = targets[meta.findIndex(m => !m.cached)]!;
+        expect(/function fn[3-5]\(/.test(chosenNew.spanText)).toBe(true);
+    });
+
+    it('a file with 30 cached functions keeps all 30 even with topSpansPerFile 10', () => {
+        const { targets } = buildProposeTargets(
+            [file('/abs/thirty.ts', richFunctions(30))],
+            cfgWith({ topSpansPerFile: 10 }, {}),
+            { isCached: () => true },
+        );
+        expect(targets).toHaveLength(30);
+    });
+
+    it('topSpansPerFile cuts UNCACHED candidates per file, on top of the cached ones', () => {
+        // 5 cached + 5 uncached in one file, topSpansPerFile 2 → 5 + 2.
+        const { targets, meta } = buildProposeTargets(
+            [file('/abs/mixed.ts', richFunctions(10))],
+            cfgWith({ topSpansPerFile: 2 }, {}),
+            { isCached: t => /function fn[0-4]\(/.test(t.spanText) },
+        );
+        expect(targets).toHaveLength(7);
+        expect(meta.filter(m => m.cached)).toHaveLength(5);
+        expect(meta.filter(m => !m.cached)).toHaveLength(2);
+    });
+
+    it('cached candidates still pass the eligibility gates (Gate 2 / risk floor / coverage)', () => {
+        // A formulaic function is never a target, cached or not.
+        const { targets } = buildProposeTargets([file('/abs/b.ts', FORMULAIC_FN)], cfg(), {
+            isCached: () => true,
+        });
+        expect(targets).toHaveLength(0);
+        // An uncovered function is gated out, cached or not.
+        const gated = buildProposeTargets([file('/abs/a.ts', RICH_FN)], cfg(), {
+            isCached: () => true,
+            coverageLookup: () => 0,
+        });
+        expect(gated.targets).toHaveLength(0);
+    });
+
+    it('keeps the merged set EV-ranked (cached and new interleaved by EV)', () => {
+        const { meta } = buildProposeTargets(
+            [file('/abs/many.ts', richFunctions(6))],
+            cfgWith({ topSpansPerFile: 100 }, {}),
+            { isCached: t => /function fn[135]\(/.test(t.spanText) },
+        );
+        for (let i = 1; i < meta.length; i++) {
+            expect(meta[i - 1]!.ev).toBeGreaterThanOrEqual(meta[i]!.ev);
+        }
+    });
+
+    it('logs the cached/new split and the cap', () => {
+        const lines: string[] = [];
+        buildProposeTargets(
+            [file('/abs/many.ts', richFunctions(6))],
+            cfgWith({ topSpansPerFile: 100 }, { maxLlmCallsPerRun: 2 }),
+            { isCached: t => /function fn[0-2]\(/.test(t.spanText), log: l => lines.push(l) },
+        );
+        expect(lines).toContain(
+            'Gate1/2: 3 cached target(s) (free) + 2 new target(s) selected (cap 2)',
+        );
+    });
+
+    it('without an isCached probe every candidate is "new" (legacy behaviour + legacy-shaped log)', () => {
+        const lines: string[] = [];
+        const { meta } = buildProposeTargets(
+            [file('/abs/many.ts', richFunctions(3))],
+            cfgWith({ topSpansPerFile: 100 }, { maxLlmCallsPerRun: 2 }),
+            { log: l => lines.push(l) },
+        );
+        expect(meta).toHaveLength(2);
+        expect(meta.every(m => !m.cached)).toBe(true);
+        expect(lines).toContain(
+            'Gate1/2: 0 cached target(s) (free) + 2 new target(s) selected (cap 2)',
+        );
+    });
+
+    it('FROZEN: skips uncached candidates entirely and says so in the log', () => {
+        const lines: string[] = [];
+        const { targets, meta } = buildProposeTargets(
+            [file('/abs/many.ts', richFunctions(6))],
+            cfgWith({ topSpansPerFile: 100 }, { maxLlmCallsPerRun: 500 }),
+            {
+                isCached: t => /function fn[0-2]\(/.test(t.spanText),
+                frozen: true,
+                log: l => lines.push(l),
+            },
+        );
+        expect(targets).toHaveLength(3);
+        expect(meta.every(m => m.cached)).toBe(true);
+        expect(lines).toContain(
+            'Gate1/2: 3 cached target(s) (free) + 0 new target(s) selected (frozen: 3 uncached skipped)',
+        );
+    });
+
+    it('populates functionName for declarations and methods, leaves arrows anonymous', () => {
+        const src = `
+class Box {
+    private static size(items, threshold) {
+        let count = 0;
+        for (let i = 0; i < items.length - 1; i++) {
+            if (items[i] > threshold && items[i + 1] <= threshold) { count = count + 1; }
+        }
+        return { count: count, ok: count >= 2 };
+    }
+}
+const arrow = (items, threshold) => {
+    let count = 0;
+    for (let i = 0; i < items.length - 1; i++) {
+        if (items[i] > threshold && items[i + 1] <= threshold) { count = count + 1; }
+    }
+    return { count: count, ok: count >= 3 };
+};
+${RICH_FN}`;
+        const { targets } = buildProposeTargets(
+            [file('/abs/names.ts', src)],
+            cfgWith({ topSpansPerFile: 100 }, {}),
+        );
+        const names = new Map(targets.map(t => [t.spanText.slice(0, 24), t.functionName]));
+        expect(targets).toHaveLength(3);
+        expect(targets.find(t => t.spanText.startsWith('private static size'))?.functionName).toBe(
+            'size',
+        );
+        expect(targets.find(t => t.spanText.startsWith('function classify'))?.functionName).toBe(
+            'classify',
+        );
+        expect(
+            targets.find(t => t.spanText.startsWith('(items, threshold) =>'))?.functionName,
+        ).toBe(undefined);
+        expect(names.size).toBe(3);
+    });
+});

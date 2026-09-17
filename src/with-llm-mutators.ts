@@ -213,12 +213,16 @@ async function runDynamicLlmPrePass(
     }
 
     const files = await readMutateSources(projectDir, undefined);
+    // `cache` + `frozen` drive MONOTONE targeting: every already-cached function
+    // is always (freely) re-proposed; the caps bound only the new, paid ones.
     const built = await buildLlmMutator(cfg, {
         provider,
         costAccumulator: cost,
         files,
         cwd: resolve(projectDir),
         log,
+        cache,
+        frozen,
     });
     injectMutators([built.mutator], { mode: 'augment' });
 

@@ -16,6 +16,8 @@
  * network (development-plan §5 network note).
  */
 
+import type { CacheEntryMeta } from './cache';
+
 /**
  * A JSON Schema document describing the shape of the structured object a caller
  * wants back. Kept as an opaque, transport-agnostic record so it can be handed
@@ -84,6 +86,12 @@ export interface ProviderRequest {
      * (development-plan §7 reproducibility).
      */
     cacheKey?: string;
+    /**
+     * Optional provenance to record on the cache entry a caching provider writes
+     * for this call (the function fingerprint + file/function names). Purely
+     * informational — it never enters the key. Ignored by non-caching providers.
+     */
+    cacheMeta?: CacheEntryMeta;
     /**
      * Optional cooperative cancellation signal. Providers SHOULD abort in-flight
      * work when this fires. Optional so callers that do not need cancellation

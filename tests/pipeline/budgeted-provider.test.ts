@@ -229,3 +229,70 @@ describe('createBudgetedProvider', () => {
         expect(hit.rawText).toBe('RAW');
     });
 });
+
+describe('createBudgetedProvider — fingerprint-keyed entries + paid-call cap', () => {
+    let dir: string;
+    let cache: ResponseCache;
+    let cost: CostAccumulator;
+
+    beforeEach(async () => {
+        dir = await mkdtemp(join(tmpdir(), 'stryker-llm-budget-fp-'));
+        cache = new ResponseCache(dir);
+        cost = new CostAccumulator();
+    });
+
+    afterEach(async () => {
+        await rm(dir, { recursive: true, force: true });
+    });
+
+    function wrap(
+        inner: MockProvider,
+        over: Partial<Parameters<typeof createBudgetedProvider>[1]> = {},
+    ) {
+        return createBudgetedProvider(inner, {
+            cache,
+            cost,
+            maxCostUsd: 5,
+            maxLlmCallsPerRun: 500,
+            defaultModel: 'claude-haiku-4-5',
+            ...over,
+        });
+    }
+
+    it('writes the request cacheMeta onto a NEW entry (and omits it when absent)', async () => {
+        const inner = new MockProvider({ responder: () => ({ v: 1 }), costUsd: 0.1 });
+        const p = wrap(inner);
+        const meta = { fingerprint: 'a'.repeat(64), fileName: '/abs/a.ts', functionName: 'f' };
+
+        await p.generate(req({ cacheKey: 'with-meta', cacheMeta: meta }));
+        expect((await cache.get('with-meta'))?.meta).toEqual(meta);
+
+        await p.generate(req({ cacheKey: 'no-meta', prompt: 'other' }));
+        expect((await cache.get('no-meta'))?.meta).toBeUndefined();
+    });
+
+    it('counts ONLY paid (uncached) calls toward maxLlmCallsPerRun — free hits never exhaust it', async () => {
+        const inner = new MockProvider({ responder: () => ({ v: 2 }), costUsd: 0 });
+        const p = wrap(inner, { maxLlmCallsPerRun: 2 });
+
+        await p.generate(req({ prompt: 'a' })); // paid 1
+        // Three FREE hits on the same key: the accumulator's call count climbs to
+        // 4 (hits are still recorded calls), but none of them is a paid call.
+        await p.generate(req({ prompt: 'a' }));
+        await p.generate(req({ prompt: 'a' }));
+        await p.generate(req({ prompt: 'a' }));
+        expect(cost.calls).toBe(4);
+
+        await p.generate(req({ prompt: 'b' })); // paid 2 — still allowed
+        expect(inner.calls).toHaveLength(2);
+
+        let thrown: unknown;
+        try {
+            await p.generate(req({ prompt: 'c' })); // paid 3 would exceed the cap of 2
+        } catch (error) {
+            thrown = error;
+        }
+        expect(thrown).toBeInstanceOf(BudgetExceededError);
+        expect((thrown as BudgetExceededError).reason).toBe('maxLlmCallsPerRun');
+    });
+});
