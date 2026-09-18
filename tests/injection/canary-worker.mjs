@@ -1,16 +1,17 @@
 /*
  * Node-side worker for the CONSOLIDATED per-version monkeypatch canary
  * (functional-architecture §3.4 silent-break risk / M5). ONE Node-subprocess
- * round-trip that asserts the FOUR load-bearing invariants of the whole
+ * round-trip that asserts the EIGHT load-bearing invariants of the whole
  * monkeypatch-injection architecture, so a Stryker bump that freezes/moves
- * `allMutators` or changes placement semantics fails LOUDLY.
+ * `allMutators`, moves the directive bookkeeper, changes placement semantics or
+ * the incremental identity key fails LOUDLY.
  *
  * WHY A NODE SUBPROCESS (not Bun): Stryker's instrumenter constructs each
  * `Mutant` via `@babel/generator`'s `generate.default`, which is `undefined`
  * under Bun (the CJS-default-interop wall documented in
  * `src/seam/instrument-worker.mjs`). So the REAL instrument step MUST run in Node.
  *
- * THE SIX INVARIANTS (emitted as one JSON object on stdout):
+ * THE EIGHT INVARIANTS (emitted as one JSON object on stdout):
  *   (1) STRUCTURAL — `allMutators` is still `Array.isArray`, NOT `Object.isFrozen`,
  *       and has the built-in count (16). A drift flags a registry reshape.
  *   (2) DEEP-IMPORT PATHS RESOLVE — mutate.js / babel-transformer.js /
@@ -23,8 +24,9 @@
  *       (augment), instrument `export const timeoutMs = 5000;`, see 3
  *       NumberLiteralValue mutants (5001/4999/0) + activation switches.
  *   (4) LLM instruments+places — build a one-entry map (hour>=12 → hour>12),
- *       inject the `llm` mutator, instrument the is-afternoon fixture, see NO
- *       statementMutantPlacer throw, 1 `llm` mutant, + its switch.
+ *       inject the 17 LLM mutators (`llm` wildcard + 16 categories, all
+ *       registered up front), instrument the is-afternoon fixture, see NO
+ *       statementMutantPlacer throw, 1 `LlmComparison` mutant, + its switch.
  *   (5) RESOLUTION-PARITY — the RUNTIME-RESOLVED `allMutators` (the M6 fix:
  *       createRequire-resolve the instrumenter package.json → join mutate.js →
  *       dynamic import) is the SAME array INSTANCE as the hardcoded deep-import
@@ -38,18 +40,31 @@
  *       withLlmMutators → live allMutators → transformBabel). Also assert the
  *       returned config has NO `llmMutator` key (clean-config) and a DOUBLE call
  *       does NOT double-register (idempotency: count stays 1).
+ *   (7) DIRECTIVE ALIAS — the SECOND monkeypatch: the instrumenter's
+ *       `directive-bookkeeper.js` resolves next to mutate.js, the alias installs,
+ *       and a legacy `// Stryker disable next-line llm: reason` makes Stryker's
+ *       own bookkeeper report the LlmComparison mutant as Ignored with that
+ *       reason, with zero logger.warn calls and the printed comment intact.
+ *   (8) INCREMENTAL IDENTITY — the real `IncrementalDiffer` reuses a report row
+ *       the migration script renamed to the live name (Killed, killedBy remapped)
+ *       and re-runs the same row left as `llm` — the guard for the migration
+ *       script's `mutantToIdentifyingKey` assumption.
  *
  * INPUT (argv): [2] path to a bundled ESM module exporting `injectMutators` +
- * `buildLlmMutatorMap` + `createLlmMutator` + `withLlmMutators` (pre-bundled by the
- * Bun test so Node can import past the repo's extensionless TS imports); [3] a
+ * `buildLlmMutatorMap` + `createLlmMutators` + `isLlmMutatorName` +
+ * `LLM_MUTATOR_NAMES` + `withLlmMutators` + `installLlmDirectiveAliasIntoStryker` +
+ * `resolveDirectiveBookkeeperPath` + `migrateIncrementalLlmNames` (pre-bundled by
+ * the Bun test so Node can import past the repo's extensionless TS imports); [3] a
  * JSON-serialized `Replacement[]` (the LLM survivors the Bun test produced via the
  * REAL propose → range-align path).
  *
  * OUTPUT: one JSON object:
  *   { frozen, isArray, builtinCount, deepImportsOk, resolutionParity,
  *     heuristic: { count, switches },
- *     llm: { instrumented, count, switches, threw },
- *     withLlmMutators: { count, switches, cleanConfig, idempotent } }
+ *     llm: { instrumented, count, switches, names, registered, threw },
+ *     withLlmMutators: { count, switches, cleanConfig, idempotent },
+ *     directiveAlias: { installed, pathResolves, ignored, warns, commentIntact },
+ *     incrementalIdentity: { renamedReused, legacyReruns, killedBy } }
  * On failure: { error } and exit 1.
  */
 
@@ -119,7 +134,17 @@ async function run() {
     }
 
     const { mods } = await import(pathToFileURL(bundlePath).href);
-    const { injectMutators, buildLlmMutatorMap, createLlmMutator, withLlmMutators } = mods;
+    const {
+        injectMutators,
+        buildLlmMutatorMap,
+        createLlmMutators,
+        isLlmMutatorName,
+        LLM_MUTATOR_NAMES,
+        withLlmMutators,
+        installLlmDirectiveAliasIntoStryker,
+        resolveDirectiveBookkeeperPath,
+        migrateIncrementalLlmNames,
+    } = mods;
 
     // (1) STRUCTURAL invariants — assert BEFORE injecting.
     const isArray = Array.isArray(allMutators);
@@ -166,8 +191,9 @@ async function run() {
     const absFileName = path.resolve(LLM_FIXTURE_NAME);
     const replacements = JSON.parse(replacementsJson).map(r => ({ ...r, fileName: absFileName }));
     const { map } = buildLlmMutatorMap(replacements);
-    const llmMutator = createLlmMutator(map);
-    allMutators.push(llmMutator);
+    const llmMutators = createLlmMutators(map);
+    allMutators.push(...llmMutators);
+    const llmRegistered = allMutators.filter(m => LLM_MUTATOR_NAMES.includes(m.name)).length;
 
     let llmThrew;
     let llmInstrumented = false;
@@ -176,7 +202,7 @@ async function run() {
     try {
         const llmRun = await instrument(LLM_FIXTURE_SOURCE, absFileName);
         llmInstrumented = true;
-        llmMutants = llmRun.mutants.filter(m => m.mutatorName === 'llm');
+        llmMutants = llmRun.mutants.filter(m => isLlmMutatorName(m.mutatorName));
         llmSwitches =
             llmMutants.length > 0 &&
             llmMutants.every(m => llmRun.output.includes(`stryMutAct_9fa48("${m.id}")`));
@@ -186,6 +212,161 @@ async function run() {
         // Restore the pristine registry so we never leak our mutators.
         allMutators.splice(0, allMutators.length, ...pristine);
     }
+
+    // (7) DIRECTIVE ALIAS — the SECOND monkeypatch. The bookkeeper's deep path
+    // must resolve next to mutate.js, the installer must return true, and a
+    // legacy `// Stryker disable next-line llm: reason` above the SAME fixture
+    // line must make Stryker itself book the LlmComparison mutant as Ignored
+    // with that reason — with NO logger.warn (every expanded name is registered)
+    // and the printed source still carrying the ORIGINAL comment text.
+    const directiveWarns = [];
+    const warnLogger = { ...silentLogger, warn: message => directiveWarns.push(message) };
+    let bookkeeperPathResolves = false;
+    try {
+        await import(pathToFileURL(resolveDirectiveBookkeeperPath()).href);
+        bookkeeperPathResolves = true;
+    } catch {
+        bookkeeperPathResolves = false;
+    }
+    const aliasInstalled = await installLlmDirectiveAliasIntoStryker(() => {});
+    const DIRECTIVE_SOURCE =
+        'export function isAfternoon(hour: number): boolean {\n' +
+        '    // Stryker disable next-line llm: vetted equivalent\n' +
+        '    return hour >= 12;\n' +
+        '}\n';
+    // The directive line shifts the fixture's `hour >= 12` down by one line.
+    const shifted = replacements.map(r => ({
+        ...r,
+        range: {
+            start: { line: r.range.start.line + 1, column: r.range.start.column },
+            end: { line: r.range.end.line + 1, column: r.range.end.column },
+        },
+    }));
+    allMutators.push(...createLlmMutators(buildLlmMutatorMap(shifted).map));
+    let directiveIgnored = [];
+    let directiveCommentIntact = false;
+    try {
+        const parser = createParser(INSTRUMENT_OPTIONS);
+        const ast = await parser(DIRECTIVE_SOURCE, absFileName);
+        const collector = new MutantCollector();
+        transformBabel(ast, collector, {
+            options: INSTRUMENT_OPTIONS,
+            mutateDescription: true,
+            logger: warnLogger,
+        });
+        const output = print(ast);
+        directiveCommentIntact = output.includes(
+            '// Stryker disable next-line llm: vetted equivalent',
+        );
+        directiveIgnored = collector.mutants
+            .map(m => m.toApiMutant())
+            .filter(m => isLlmMutatorName(m.mutatorName))
+            .map(m => ({
+                mutatorName: m.mutatorName,
+                ...(m.status === undefined ? {} : { status: m.status }),
+                ...(m.statusReason === undefined ? {} : { statusReason: m.statusReason }),
+            }));
+    } finally {
+        allMutators.splice(0, allMutators.length, ...pristine);
+    }
+
+    // (8) INCREMENTAL IDENTITY — the real differ keys a mutant by
+    // `file@loc\n<mutatorName>: <replacement>`. A report row migrated to the live
+    // name must be REUSED (Killed, killedBy remapped); the same row left as `llm`
+    // must re-run. Guards the migration script's identity-format assumption.
+    const { IncrementalDiffer } =
+        await import('../../node_modules/@stryker-mutator/core/dist/src/mutants/incremental-differ.js');
+    const differFile = path.resolve('fixture.ts');
+    const differSource = 'const value = hour >= 12;';
+    // 0-based differ coordinates for `hour >= 12`; the on-disk report is 1-based.
+    const differLoc = { start: { line: 0, column: 14 }, end: { line: 0, column: 24 } };
+    const diskLoc = { start: { line: 1, column: 15 }, end: { line: 1, column: 25 } };
+    const differLogger = {
+        isInfoEnabled: () => false,
+        isDebugEnabled: () => false,
+        trace() {},
+        debug() {},
+    };
+    const diffWith = migrate => {
+        const current = {
+            id: 'new-id',
+            fileName: differFile,
+            location: differLoc,
+            mutatorName: 'LlmComparison',
+            replacement: 'hour > 12',
+        };
+        const oldReport = {
+            files: {
+                'fixture.ts': {
+                    source: differSource,
+                    mutants: [
+                        {
+                            id: 'old-id',
+                            mutatorName: 'llm',
+                            replacement: 'hour > 12',
+                            location: diskLoc,
+                            status: 'Killed',
+                            coveredBy: ['old-test'],
+                            killedBy: ['old-test'],
+                        },
+                    ],
+                },
+            },
+            testFiles: { '': { tests: [{ id: 'old-test', name: 'kills' }] } },
+        };
+        // Convert the on-disk 1-based report the way project-reader.js does.
+        const toDiffer = report => ({
+            ...report,
+            files: Object.fromEntries(
+                Object.entries(report.files).map(([name, file]) => [
+                    name,
+                    {
+                        ...file,
+                        mutants: file.mutants.map(m => ({
+                            ...m,
+                            location: {
+                                start: {
+                                    line: m.location.start.line - 1,
+                                    column: m.location.start.column - 1,
+                                },
+                                end: {
+                                    line: m.location.end.line - 1,
+                                    column: m.location.end.column - 1,
+                                },
+                            },
+                        })),
+                    },
+                ]),
+            ),
+        });
+        const test = { id: 'new-test', name: 'kills', status: 'success' };
+        const coverage = {
+            hasCoverage: true,
+            hasStaticCoverage: () => false,
+            testsById: new Map([[test.id, test]]),
+            forMutant: () => new Set([test]),
+            addTest() {},
+            addCoverage() {},
+        };
+        return new IncrementalDiffer(
+            differLogger,
+            { force: false },
+            { [differFile]: { mutate: true } },
+        ).diff(
+            [current],
+            coverage,
+            toDiffer(migrate ? migrateIncrementalLlmNames(oldReport).report : oldReport),
+            new Map([['fixture.ts', differSource]]),
+        )[0];
+    };
+    const legacyResult = diffWith(false);
+    // The SAME legacy report fed through the migration (its row becomes LlmComparison).
+    const migratedResult = diffWith(true);
+    const incrementalIdentity = {
+        legacyReruns: legacyResult.status === undefined,
+        renamedReused: migratedResult.status === 'Killed',
+        killedBy: migratedResult.killedBy ?? [],
+    };
 
     // (6) WITHLLMMUTATORS-VIA-REAL-INSTRUMENTER — the END-TO-END consumable path:
     // call the bundled `withLlmMutators` (heuristics-only — no dynamicLLM, so
@@ -227,6 +408,8 @@ async function run() {
             instrumented: llmInstrumented,
             count: llmMutants.length,
             switches: llmSwitches,
+            names: llmMutants.map(m => m.mutatorName),
+            registered: llmRegistered,
             ...(llmThrew === undefined ? {} : { threw: llmThrew }),
         },
         // (6) WITHLLMMUTATORS END-TO-END + clean-config + idempotency.
@@ -236,6 +419,16 @@ async function run() {
             cleanConfig: cleanConfigOk,
             idempotent: nlvCount === 1,
         },
+        // (7) DIRECTIVE ALIAS (the second monkeypatch).
+        directiveAlias: {
+            installed: aliasInstalled,
+            pathResolves: bookkeeperPathResolves,
+            ignored: directiveIgnored,
+            warns: directiveWarns,
+            commentIntact: directiveCommentIntact,
+        },
+        // (8) INCREMENTAL IDENTITY (the migration's assumption).
+        incrementalIdentity,
     };
 }
 

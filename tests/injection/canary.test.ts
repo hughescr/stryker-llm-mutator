@@ -2,17 +2,19 @@
  * THE CONSOLIDATED PER-VERSION MONKEYPATCH CANARY (functional-architecture §3.4
  * silent-break risk / M5). This is the SINGLE CI-gated assertion of the whole
  * monkeypatch-injection architecture: in ONE Node-subprocess round-trip it checks
- * the four load-bearing invariants, so a Stryker bump that freezes/moves
- * `allMutators` or changes placement semantics fails LOUDLY instead of silently
- * producing zero mutants.
+ * the eight load-bearing invariants, so a Stryker bump that freezes/moves
+ * `allMutators`, moves the directive bookkeeper, changes placement semantics or
+ * the incremental identity key fails LOUDLY instead of silently producing zero
+ * mutants (or silently un-ignoring hundreds of vetted equivalents).
  *
- * It is INTENTIONALLY THIN — the two detailed proofs (`injection-proof.test.ts`
- * and `llm-placement-proof.test.ts`) remain for regression depth; this canary
- * asserts the four invariants in one worker spawn so CI can run it in isolation
- * as a named, blocking step (`bun run canary`) distinct from the coverage-gated
- * full `bun test`.
+ * It is INTENTIONALLY THIN — the detailed proofs (`injection-proof.test.ts`,
+ * `llm-placement-proof.test.ts`, `llm-directive-proof.test.ts`,
+ * `incremental-migration-proof.test.ts`) remain for regression depth; this canary
+ * asserts the invariants in one worker spawn so CI can run it in isolation as a
+ * named, blocking step (`bun run canary`) distinct from the coverage-gated full
+ * `bun test`.
  *
- * THE FOUR INVARIANTS (functional-architecture §3.4 / spec):
+ * THE EIGHT INVARIANTS (functional-architecture §3.4 / spec):
  *   (1) STRUCTURAL: `allMutators` is `Array.isArray`, NOT `Object.isFrozen`, and
  *       has the built-in count 16 — a drift flags a registry reshape.
  *   (2) DEEP-IMPORT PATHS RESOLVE: the five deep `dist/src/...` imports load (the
@@ -21,7 +23,16 @@
  *   (3) HEURISTIC mutant instruments+places: `numberLiteralValueMutator` on
  *       `timeoutMs = 5000` → 3 NumberLiteralValue mutants + activation switches.
  *   (4) LLM mutant instruments+places: a node-aligned `hour >= 12 → hour > 12`
- *       survivor → 1 `llm` mutant, NO statementMutantPlacer throw, + its switch.
+ *       survivor → 1 `LlmComparison` mutant (all 17 names registered), NO
+ *       statementMutantPlacer throw, + its switch.
+ *   (5) RESOLUTION-PARITY and (6) WITHLLMMUTATORS end-to-end (see the worker).
+ *   (7) DIRECTIVE ALIAS: the bookkeeper deep path resolves, the alias installs,
+ *       and a legacy `// Stryker disable next-line llm` yields an Ignored
+ *       LlmComparison mutant with zero warn() calls — the guard for the second
+ *       monkeypatch.
+ *   (8) INCREMENTAL IDENTITY: the real differ reuses a report row renamed to the
+ *       live name and re-runs a legacy `llm` row — the guard for the migration
+ *       script's identity-format assumption.
  *
  * THE BUN/NODE WALL still applies: Stryker's instrumenter throws under Bun, so the
  * instrument step runs in a Node subprocess (the `canary-worker.mjs`). The Bun
@@ -54,12 +65,31 @@ interface CanaryResponse {
     deepImportsOk: boolean;
     resolutionParity: boolean;
     heuristic: { count: number; switches: boolean };
-    llm: { instrumented: boolean; count: number; switches: boolean; threw?: string };
+    llm: {
+        instrumented: boolean;
+        count: number;
+        switches: boolean;
+        names: string[];
+        registered: number;
+        threw?: string;
+    };
     withLlmMutators: {
         count: number;
         switches: boolean;
         cleanConfig: boolean;
         idempotent: boolean;
+    };
+    directiveAlias: {
+        installed: boolean;
+        pathResolves: boolean;
+        ignored: { mutatorName: string; status?: string; statusReason?: string }[];
+        warns: string[];
+        commentIntact: boolean;
+    };
+    incrementalIdentity: {
+        renamedReused: boolean;
+        legacyReruns: boolean;
+        killedBy: string[];
     };
     error?: string;
 }
@@ -139,7 +169,7 @@ async function buildLlmSurvivors(): Promise<Replacement[]> {
     return replacements;
 }
 
-describe('per-version monkeypatch canary — six load-bearing invariants (Node instrumenter)', () => {
+describe('per-version monkeypatch canary — eight load-bearing invariants (Node instrumenter)', () => {
     let tmpDir = '';
     let bundlePath = '';
 
@@ -158,9 +188,11 @@ describe('per-version monkeypatch canary — six load-bearing invariants (Node i
             entryPath,
             "import { injectMutators } from '../src/injection';\n" +
                 "import { buildLlmMutatorMap } from '../src/pipeline/llm-map';\n" +
-                "import { createLlmMutator } from '../src/mutators/llm-mutator';\n" +
+                "import { createLlmMutators, isLlmMutatorName, LLM_MUTATOR_NAMES } from '../src/mutators/llm-mutator';\n" +
                 "import { withLlmMutators } from '../src/with-llm-mutators';\n" +
-                'export const mods = { injectMutators, buildLlmMutatorMap, createLlmMutator, withLlmMutators };\n',
+                "import { installLlmDirectiveAliasIntoStryker, resolveDirectiveBookkeeperPath } from '../src/directive-alias';\n" +
+                "import { migrateIncrementalLlmNames } from '../scripts/migrate-incremental-llm-names';\n" +
+                'export const mods = { injectMutators, buildLlmMutatorMap, createLlmMutators, isLlmMutatorName, LLM_MUTATOR_NAMES, withLlmMutators, installLlmDirectiveAliasIntoStryker, resolveDirectiveBookkeeperPath, migrateIncrementalLlmNames };\n',
         );
         bundlePath = path.join(tmpDir, 'canary-mods.mjs');
         const built = await Bun.build({
@@ -189,7 +221,7 @@ describe('per-version monkeypatch canary — six load-bearing invariants (Node i
         }
     });
 
-    it('asserts all six invariants in one worker round-trip', async () => {
+    it('asserts all eight invariants in one worker round-trip', async () => {
         const survivors = await buildLlmSurvivors();
         const res = await runWorker(bundlePath, survivors);
 
@@ -206,11 +238,35 @@ describe('per-version monkeypatch canary — six load-bearing invariants (Node i
         expect(res.heuristic.count).toBe(3);
         expect(res.heuristic.switches).toBe(true);
 
-        // (4) LLM mutant instruments + places — NO statementMutantPlacer throw.
+        // (4) LLM mutant instruments + places — NO statementMutantPlacer throw —
+        // and is named by its category; all 17 names were registered up front.
         expect(res.llm.threw).toBeUndefined();
         expect(res.llm.instrumented).toBe(true);
         expect(res.llm.count).toBe(1);
+        expect(res.llm.names).toEqual(['LlmComparison']);
+        expect(res.llm.registered).toBe(17);
         expect(res.llm.switches).toBe(true);
+
+        // (7) DIRECTIVE ALIAS (the second monkeypatch): the bookkeeper deep path
+        // resolves, the installer returns true, and a legacy
+        // `// Stryker disable next-line llm` fixture yields an IGNORED
+        // LlmComparison mutant (Stryker's own bookkeeping, the directive's
+        // reason) with zero logger.warn calls and the source comment intact.
+        expect(res.directiveAlias.pathResolves).toBe(true);
+        expect(res.directiveAlias.installed).toBe(true);
+        expect(res.directiveAlias.ignored).toEqual([
+            { mutatorName: 'LlmComparison', status: 'Ignored', statusReason: 'vetted equivalent' },
+        ]);
+        expect(res.directiveAlias.warns).toEqual([]);
+        expect(res.directiveAlias.commentIntact).toBe(true);
+
+        // (8) INCREMENTAL IDENTITY: the real differ's identifying key includes
+        // `mutatorName`, so a report row renamed to the live name by the migration
+        // script is REUSED (killedBy remapped) while a legacy `llm` row re-runs —
+        // the per-version guard for the migration's identity assumption.
+        expect(res.incrementalIdentity.renamedReused).toBe(true);
+        expect(res.incrementalIdentity.legacyReruns).toBe(true);
+        expect(res.incrementalIdentity.killedBy).toEqual(['new-test']);
 
         // (5) RESOLUTION-PARITY: the M6 runtime-resolved `allMutators` is the SAME
         // instance as the hardcoded deep-import — the load-bearing guarantee that

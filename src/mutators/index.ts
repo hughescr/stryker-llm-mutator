@@ -35,10 +35,16 @@ export { spreadOperandDropMutator } from './spread-operand-drop';
 // P4 (M5)
 export { stringMethodArgSwapMutator } from './string-method-arg-swap';
 
-// The injected dynamic-LLM NodeMutator (M3): a sync map lookup over the pre-pass
-// precomputed map. NOT part of `heuristicMutators` (it is built per-run from the
-// LLM map, not a fixed singleton); the driver pushes it alongside the heuristics.
-export { createLlmMutator, LLM_MUTATOR_NAME } from './llm-mutator';
+// The injected dynamic-LLM NodeMutators (M3): sync map lookups over the pre-pass
+// precomputed map, one per registered name (`llm` wildcard + 16 categories). NOT
+// part of `heuristicMutators` (they are built per-run from the LLM map, not fixed
+// singletons); the driver pushes them alongside the heuristics.
+export {
+    createLlmMutators,
+    isLlmMutatorName,
+    LLM_MUTATOR_NAME,
+    LLM_MUTATOR_NAMES,
+} from './llm-mutator';
 
 /**
  * Every heuristic mutator this package ships, in a stable order (P1 → P2 → P3 →

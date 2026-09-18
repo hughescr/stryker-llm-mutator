@@ -53,11 +53,11 @@ function makeLogger(): { logger: Logger; lines: string[] } {
     return { logger, lines };
 }
 
-/** Build a synthetic MutantResult (an `llm` survivor by default). */
+/** Build a synthetic MutantResult (an `LlmComparison` survivor by default). */
 function mutant(over: Partial<MutantResult> & Pick<MutantResult, 'id'>): MutantResult {
     return {
         fileName: '/abs/a.ts',
-        mutatorName: 'llm',
+        mutatorName: 'LlmComparison',
         status: 'Survived',
         location: { start: { line: 2, column: 12 }, end: { line: 2, column: 22 } },
         replacement: 'hour > 12',
@@ -85,6 +85,7 @@ describe('llm-mutator reporter plugin — behavior', () => {
         const e: ParsedEntry = {
             node,
             mutatorName: 'llm/boundary',
+            category: 'LlmComparison',
             replacement: 'hour > 12',
             original: 'hour >= 12',
             rationale: 'Off-by-one.',
@@ -104,8 +105,9 @@ describe('llm-mutator reporter plugin — behavior', () => {
         const all = lines.join('\n');
         expect(all).toContain('SURVIVORS');
         expect(all).toContain('/abs/a.ts:2:12');
-        // The precise llm/<tag> + original → replacement + rationale.
-        expect(all).toContain('llm/boundary');
+        // The category name + precise /<tag> + original → replacement + rationale.
+        expect(all).toContain('LlmComparison/boundary');
+        expect(all).toContain('LLM mutants by category: LlmComparison 1 (survived 1)');
         expect(all).toContain('hour >= 12 -> hour > 12');
         expect(all).toContain('Off-by-one.');
         // The cost line from the snapshot.

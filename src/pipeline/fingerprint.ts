@@ -68,6 +68,7 @@
 
 import { createHash } from 'node:crypto';
 import { parse, parseExpression, type ParserOptions } from '@babel/parser';
+import type { Node } from '@babel/types';
 
 import { BABEL_PLUGINS } from './babel-walk';
 
@@ -535,8 +536,22 @@ export function nodeShape(node: unknown): string {
  * legal — a real syntax error still yields `undefined`.
  */
 export function expressionShape(text: string): string | undefined {
-    const ast = tryParse(() => parseExpression(text, PARSE_OPTIONS), TOLERATED_EXPRESSION_REASONS);
+    const ast = parseExpressionTolerant(text);
     return ast === undefined ? undefined : canonicalize(ast);
+}
+
+/**
+ * Parse ONE sub-expression's source text with the pipeline's plugin set,
+ * tolerating only the context errors a bare sub-expression cannot avoid
+ * (`this.#x`, `super.x`, `yield x`, `new.target`) — the exact parse route
+ * {@link expressionShape} takes before canonicalizing. Returns the expression
+ * node, or `undefined` on a real syntax error. Shared with the mutant
+ * classifier (`classify.ts`) so a cached candidate's `original` is parsed the
+ * same way there as it is for shape matching.
+ */
+export function parseExpressionTolerant(text: string): Node | undefined {
+    const ast = tryParse(() => parseExpression(text, PARSE_OPTIONS), TOLERATED_EXPRESSION_REASONS);
+    return ast === undefined ? undefined : (ast as Node);
 }
 
 /** A comment's `[start, end)` offsets in the ORIGINAL (unwrapped) text. */

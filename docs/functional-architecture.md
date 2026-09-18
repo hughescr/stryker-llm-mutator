@@ -102,7 +102,9 @@ costs ~$0 and a few minutes, and **must be the first milestone**.
 | Driver/CLI (`src/driver/`, `bin`) | NEW | read target config, switch gating, optional LLM pre-pass, push mutators, invoke `Stryker` in-process |
 | Heuristics engine (`src/heuristics/`) | NEW | formulaic operators authored directly as Stryker `NodeMutator`s, default ON |
 | Dynamic-LLM pre-pass (`src/pipeline/`) | EXTEND | stage-1 targeting (NEW), batched propose (exists), filters (exists), build precomputed `(fileName,loc)→Node[]` map (NEW), budget/stop enforcement (NEW) |
-| `LLMMutator` (`src/heuristics/` or `src/pipeline/`) | NEW | ONE injected `NodeMutator` doing a synchronous lookup in the precomputed map and yielding precomputed replacement nodes |
+| LLM mutators (`src/mutators/llm-mutator.ts`) | NEW | 17 injected `NodeMutator`s (the no-op `llm` wildcard + one per `Llm<Category>`) each doing a synchronous lookup in the precomputed map and yielding the precomputed replacement nodes of its own category |
+| Classifier (`src/pipeline/classify.ts`) | NEW | Deterministic `(original, replacement) → Llm<Category>`, applied at map-build time, after the cache boundary |
+| Directive alias (`src/directive-alias.ts`) | NEW | The second monkeypatch: legacy plain-`llm` directives + `excludedMutations: ['llm']` expanded to every category (dynamic-LLM runs only) |
 | Injection seam (`src/seam/inject*`) | NEW (replaces runner.ts) | deep-import `allMutators`, clear-or-augment, push our mutators; smoke-assert the array is still mutable |
 | Provider (`src/llm/`) | EXTEND | Haiku call, cache wrap, cost accumulate, mid-run ceiling check (NEW) |
 | Config (`src/config.ts`) | EXTEND | add `heuristics` + `dynamicLLM` blocks + `maxCostUsd` |
@@ -146,11 +148,18 @@ also remains a documented contingency; see §3.)
   report; our mutators only supply `{ name, mutate }`. Distinctness comes from the
   mutator `name`, which flows into the report's `mutatorName`. SHIPPED NAMES are
   bare PascalCase per operator (`NumberLiteralValue`, `CallArgumentTweak`, … the
-  full §5 catalog) and the single name `llm` for
-  the dynamic-LLM mutator — NOT the `heuristic/<op>` / `llm/<tag>` forms some older
-  diagrams below still show (the per-candidate `llm/<tag>` tag lives only inside the
-  filtered report artifact, §6). Distinctness from the 16 built-ins holds because
-  none of our names collide with a built-in name.
+  full §5 catalog) and, for the dynamic-LLM mutants, the closed 16-name taxonomy
+  `Llm<Category>` (`LlmComparison`, `LlmArithmetic`, `LlmLogical`, `LlmNullish`,
+  `LlmNegate`, `LlmAwait`, `LlmTernary`, `LlmMethod`, `LlmArgument`,
+  `LlmProperty`, `LlmIdentifier`, `LlmNumber`, `LlmString`, `LlmConstant`,
+  `LlmStatement`, `LlmOther` — `src/pipeline/classify.ts`), chosen
+  DETERMINISTICALLY from the parsed `(original, replacement)` pair after the
+  cache boundary, plus the legacy name `llm` kept registered as a no-op wildcard
+  — NOT the `heuristic/<op>` / `llm/<tag>` forms some older diagrams below still
+  show (the per-candidate `llm/<tag>` tag lives only inside the filtered report
+  artifact, §6, suffixed onto the category as `LlmComparison/<tag>`).
+  Distinctness from the 16 built-ins holds because none of our names collide
+  with a built-in name (case-insensitively — the bookkeeper lowercases).
 - **The LLM `mutate()` is synchronous.** Stryker's `NodeMutator.mutate(path)`
   returns a *synchronous* `Iterable<types.Node>`. There is no place to await an
   LLM call inside it. All LLM work happens in an **async pre-pass** before the
@@ -250,14 +259,22 @@ mutator catalog itself.
   4. **build a precomputed map** keyed by `(fileName, node-location)` →
      pre-parsed replacement AST node(s).
 
-  Then ONE injected `LLMMutator` (`name: 'llm/<tag>'`) does a **synchronous
-  lookup** in that map inside `mutate(path)` and yields the precomputed nodes.
+  Each map entry is stamped with its `Llm<Category>` at build time
+  (`classifyNodes(original, replacement)`, `src/pipeline/classify.ts`).
+
+  Then the 17 injected LLM mutators (`createLlmMutators(map)`: the no-op `llm`
+  wildcard + one `NodeMutator` per category, static names pushed before any
+  instrumentation regardless of the map contents) each do a **synchronous
+  lookup** in that map inside `mutate(path)` and yield the precomputed nodes of
+  their OWN category. One `NodeMutator` per name — not one mutator yielding under
+  several names — because the bookkeeper snapshots names at construction and a
+  name-flipping getter would be unregistered and order-fragile.
   The replacement-string → AST-node logic the old seam used (`parseFragment`,
   wrap-in-parens) is **REUSED** here to build the map — it is not wasted work.
 
 - **The two config switches.** `heuristics` (default ON) → push the heuristic
-  mutators; `dynamicLLM` (default OFF) → run the pre-pass and push the
-  `LLMMutator`. For a suite already at 100% on the built-ins (isambard), the
+  mutators; `dynamicLLM` (default OFF) → run the pre-pass, install the legacy-`llm`
+  directive alias (§3.4 / §5) and push the LLM mutators. For a suite already at 100% on the built-ins (isambard), the
   driver can run **OURS ONLY** to avoid re-running the 16 built-ins:
   ```js
   allMutators.length = 0;      // clear built-ins
@@ -306,10 +323,24 @@ we **do not present a comparable-looking score** (§6, and risks below).
   supported specifier — fragile across versions, part of the same smoke-test
   surface.
 
+- **A SECOND monkeypatch: the legacy-`llm` directive alias.** On a dynamic-LLM
+  run `src/directive-alias.ts` resolves the instrumenter's internal
+  `dist/src/transformers/directive-bookkeeper.js` by the same runtime-path
+  technique and wraps `DirectiveBookkeeper.prototype.processStrykerDirectives`
+  once (Symbol guard), so a `// Stryker disable|restore [next-line] …` list
+  naming a bare `llm` is booked as if it also named every `Llm<Category>` (the
+  comment text is expanded in a SUBSTITUTE node; the AST and printed output are
+  untouched). Same failure surface as `allMutators`: a moved module or renamed
+  method breaks it — but NOT silently: the installer logs a loud `WARNING` and
+  returns `false` (never throws), the run proceeds, and what is lost is only
+  plain-`llm` directive matching (`Llm<Category>` and `all` directives, and the
+  expanded `excludedMutations`, keep working natively). The canary (§3.4
+  smoke test, invariant 7) fails loudly in CI.
+
 - **The reported mutation SCORE now includes our mutants.** Because our mutants
   are added to Stryker's run, the standard report's score covers them too and is
   **NOT comparable to a vanilla Stryker score**. We tag our mutants distinctly
-  (`heuristic/*`, `llm/*`) and surface our own survivor view; we never claim the
+  (bare heuristic names, `Llm<Category>`) and surface our own survivor view; we never claim the
   blended number is the project's "real" mutation score.
 
 - **LLM mutants are non-deterministic run-to-run.** No temperature control via
@@ -532,24 +563,54 @@ clean first proof; P2–P4 land after the survivor view + equivalent filtering
 preference where a coverage signal is available.
 
 **Equivalence/disable-comment handling.** Our operators ship under BARE PascalCase
-names (`NumberLiteralValue`, `CallArgumentTweak`, …) and
-the dynamic-LLM mutator under the single name `llm` — NOT `heuristic/<op>` /
+names (`NumberLiteralValue`, `CallArgumentTweak`, …) and the dynamic-LLM mutants
+under the closed `Llm<Category>` taxonomy (16 names, `src/pipeline/classify.ts`)
+plus the legacy `llm` kept registered as a no-op wildcard — NOT `heuristic/<op>` /
 `llm/<tag>` (the per-candidate `llm/<tag>` tag survives only inside the filtered
-report artifact's `mutatorName`, not as the Stryker operator name). Disable-comment
-honoring works for our names FOR FREE, because of HOW Stryker wires its
-`DirectiveBookkeeper`: `babel-transformer.js` constructs the bookkeeper with the
-SAME live `mutators` array (our injected `allMutators`), and at collection time it
-computes `findIgnoreReason(line, mutator.name)` against the comment's
+report artifact's `mutatorName`, suffixed onto the category, not as the Stryker
+operator name). WHY categories: the bookkeeper ignores by `(line, name)` only and
+mutators cannot set `ignoreReason`, so with one `llm` name a directive written for
+a vetted-equivalent proposal also hid every OTHER proposal on that line
+(`c.unreadCount > 0 → >= 1` vs `→ !== 0`; three such double-hits in one day in
+isambard). The category is a pure, deterministic function of the parsed
+`(original, replacement)` pair — never the model's free-text tag — computed at
+map-build time, strictly AFTER the cache boundary (the propose prompt, system
+prompt, schema and cache key are untouched). Disable-comment honoring works for
+these names FOR FREE, because of HOW Stryker wires its `DirectiveBookkeeper`:
+`babel-transformer.js` constructs the bookkeeper with the SAME live `mutators`
+array (our injected `allMutators`), and at collection time it computes
+`findIgnoreReason(line, mutator.name)` against the comment's
 case-insensitively-matched names OR the wildcard `all`, then filters out
 `ignoreReason`d mutants. Injection happens BEFORE the bookkeeper is constructed, so:
 
 - `// Stryker disable all` (and `disable next-line all`) DOES suppress our
-  heuristic mutants AND the `llm` mutant — the wildcard matches everything,
+  heuristic mutants AND every `Llm*` mutant — the wildcard matches everything,
   including our names. **Confirmed clean win, no code needed.**
-- `// Stryker disable NumberLiteralValue` (or `disable llm`, `disable
-  CallArgumentTweak`, …) WORKS going forward — our names are in the live list the
+- `// Stryker disable NumberLiteralValue` (or `disable LlmComparison`, `disable
+  CallArgumentTweak`, …) WORKS natively — our names are in the live list the
   bookkeeper was built with (case-insensitive match), so a user CAN suppress a
-  specific re-surfaced equivalent by name.
+  specific re-surfaced equivalent by name, and on a span shared by several
+  categories a `LlmComparison` directive leaves the `LlmLogical` / `LlmNumber`
+  mutants live (proven: `tests/injection/llm-directive-proof.test.ts`).
+- **Plain `llm` is a wildcard ALIAS for every category** — the one place we do add
+  code (`src/directive-alias.ts`, the second monkeypatch, §3.4): on a dynamic-LLM
+  run `DirectiveBookkeeper.prototype.processStrykerDirectives` is wrapped once so
+  a `disable|restore [next-line] <names>[: reason]` list naming `llm` (any
+  position, any case) is read IN MEMORY with the 16 category names appended
+  (`expandLlmDirective`, pure); Stryker then does its own bookkeeping, so every
+  legacy form found in isambard (`disable next-line llm: reason`, `llm,
+  NumberLiteralValue`, `EqualityOperator,llm`, `disable llm … restore llm`
+  regions) ignores every `Llm*` mutant on its line/region and Stryker itself
+  reports them as `status: 'Ignored'` with the directive's reason; a `restore
+  LlmNumber` inside a `disable llm` region restores only that category — which is
+  why expansion beats a `findIgnoreReason` fallback. The real AST and the printed
+  output are never modified. `excludedMutations` is a SEPARATE, case-sensitive
+  exact-name check the patch cannot reach, so a list containing `'llm'` is
+  expanded by the pure `expandExcludedMutations` on BOTH paths: `withLlmMutators`
+  writes it into the clean config it returns, and the CLI reads the target's
+  `excludedMutations` in `readTargetConfig`, expands it in `buildRunPlan`
+  (dynamic-LLM only, only when `'llm'` is present) and passes it inside the
+  options given to `new Stryker(...)`, which override the file's value.
 - A pre-existing `// Stryker disable EqualityOperator` (a BUILT-IN name) does NOT
   suppress our differently-named mutants — by design. So a span the author vetted
   and disabled for a built-in operator can RE-SURFACE as a survivor under our
@@ -557,14 +618,18 @@ case-insensitively-matched names OR the wildcard `all`, then filters out
   survivors still need human audit (§3.4).
 - `warnAboutUnusedDirective`: a `disable <name>` comment naming a mutator not in
   the live injected set (e.g. naming `llm` in a heuristics-only run) emits a benign
-  `log.warn("Unused 'Stryker disable' directive…")`.
+  `log.warn("Unused 'Stryker disable' directive…")`. On a dynamic-LLM run all 17
+  names are registered up front (static, regardless of the map contents), so the
+  expanded list never names an unknown mutator and the warning never fires.
+- Heuristics-only runs install nothing, register no `Llm*` name and expand
+  nothing: byte-for-byte the previous behaviour.
 
 To suppress one of OUR re-surfaced equivalents, add `// Stryker disable next-line
-all` (covers everything at that line) OR `// Stryker disable next-line
-<OurOperatorName>` / `// Stryker disable next-line llm`, with a `:reason`. We add
-NO parallel disable-honoring layer — duplicating Stryker's bookkeeper would risk
-diverging from it. For the first useful run, **accept the residual noise and
-human-audit survivors**.
+all` (covers everything at that line), `// Stryker disable next-line
+<OurOperatorName>` / `Llm<Category>` (one kind), or the `llm` wildcard, with a
+`:reason`. Beyond the in-memory alias we add NO parallel disable-honoring layer —
+duplicating Stryker's bookkeeper would risk diverging from it. For the first
+useful run, **accept the residual noise and human-audit survivors**.
 
 ---
 
@@ -639,18 +704,51 @@ to force CACHE-ONLY dynamicLLM (deterministic, free CI gate — §3.4); plus
 pass-through `--mutate`, `--config-file`, `--concurrency`, `--reporters`,
 `--incremental`/`--no-incremental`, `--temp-dir`.
 
+**Reading from the target — `excludedMutations`.** Besides the `llmMutator`
+block, `readTargetConfig` surfaces ONE other top-level key of the target's
+config verbatim: `excludedMutations`. Stryker matches that list case-sensitively
+by exact mutator name inside the instrumenter (a transformer-local closure the
+directive alias cannot reach), so a bare `llm` there would silently stop
+excluding the `Llm<Category>` mutants. `buildRunPlan` (pure) expands it with
+`expandExcludedMutations` — only on a dynamic-LLM run and only when `'llm'` is
+present — into `strykerOptions.excludedMutations`, which `new Stryker(...)`
+applies as an override of the file's value; otherwise the key is omitted so
+heuristics-only CLI runs stay byte-identical. `withLlmMutators` does the same
+expansion on the clean config it returns.
+
 **Reporting.** Because our mutants run *inside* Stryker, they already appear in
 **Stryker's standard report** (HTML / JSON / dashboard) with `mutatorName` set to
-our operator's bare PascalCase name (`NumberLiteralValue`, …) or `llm` — visually
-distinct from built-ins, no schema emission of our own required for basic
-consumption. On top of that, the reporter
-adds **our own view**: a console summary with a **SURVIVORS** section
-(`file:line  mutatorName  original → replacement  (rationale)` — survivors ARE
-the test holes the tool exists to find), a clear note that **the blended score
-includes our mutants and is not comparable to a vanilla Stryker score**, and a
-final `Total LLM cost: $X.XX across N calls` from `CostAccumulator.snapshot()`.
-Optionally emit a filtered `reports/mutation-llm.json` containing only our mutants
-for a clean per-tool view.
+our operator's bare PascalCase name (`NumberLiteralValue`, …) or the dynamic-LLM
+mutant's `Llm<Category>` — visually distinct from built-ins, no schema emission
+of our own required for basic consumption. On top of that, the reporter adds
+**our own view**: a console summary with a **SURVIVORS** section
+(`file:line  Llm<Category>/<tag>  original → replacement  (rationale)` —
+survivors ARE the test holes the tool exists to find; the correlator matches each
+result to the map entry of its OWN category on a shared span), an `LLM mutants by
+category: LlmComparison 812 (survived 2), …` line, a clear note that **the
+blended score includes our mutants and is not comparable to a vanilla Stryker
+score**, and a final `Total LLM cost: $X.XX across N calls` from
+`CostAccumulator.snapshot()`. Optionally emit a filtered
+`reports/mutation-llm.json` containing only our mutants for a clean per-tool view.
+
+**Incremental reports across the naming change.** Stryker's incremental differ
+identifies a mutant by `relFile@start-end\n<mutatorName>: <replacement>`, so an
+existing `stryker-incremental.json` written under the single `llm` name misses
+every LLM row once after the upgrade (isambard: ~3,900 re-executions, roughly a
+tenth of a run). `scripts/migrate-incremental-llm-names.ts` renames those rows
+OFFLINE: for each `llm` row it slices the report's own `source` at the row's
+1-based `location`, parses slice + `replacement`, undoes the shorthand-object
+lift where it applies, and writes `classifyNodes(...)` into `mutatorName` — and
+nothing else. It writes a SEPARATE `<name>.llm-migrated.json` (never in place;
+the human copies it over between runs). Sound by construction: the differ still
+performs its full source diff and test-key checks; renaming can only turn a
+guaranteed miss into a hit when the live plugin assigns the same name to the
+same `(file, location, replacement)`, which is the very code change the old
+verdict was recorded for; a wrong or skipped name is a rerun, never a false
+verdict. Proven against the real `IncrementalDiffer` in
+`tests/injection/incremental-migration-proof.test.ts` (reuse + `killedBy` remap,
+rerun after a source or test change, rerun on a wrong name) and guarded per
+Stryker version by canary invariant 8.
 
 ---
 
@@ -737,16 +835,23 @@ load-bearing proof.
   instrumenter**. Plus, also DONE:
   - **The per-version monkeypatch canary (§3.4) is wired into CI.** A single
     consolidated `tests/injection/canary.test.ts` (+ `canary-worker.mjs`) asserts,
-    in one Node-subprocess round-trip, the FOUR load-bearing invariants:
+    in one Node-subprocess round-trip, the load-bearing invariants:
     (1) `allMutators` is a non-frozen `Array` of the built-in count (16);
     (2) the five deep `dist/src/...` imports resolve AND `babel-transformer` reads
     the same array we push to; (3) a heuristic mutant instruments+places (the
-    `5000` fixture → 3 `NumberLiteralValue` mutants + switches); (4) an `llm` mutant
-    instruments+places with NO `statementMutantPlacer` throw (the node-aligned
-    `hour >= 12 → hour > 12` survivor). A `bun run canary` script runs it in
-    isolation, and `.github/workflows/ci.yml` runs the six gates in order then the
-    canary as a final named "per-version monkeypatch canary" step. The two detailed
-    proofs (`injection-proof` + `llm-placement-proof`) remain for regression depth.
+    `5000` fixture → 3 `NumberLiteralValue` mutants + switches); (4) an LLM mutant
+    instruments+places with NO `statementMutantPlacer` throw and is named by its
+    category (`LlmComparison`, all 17 names registered — the node-aligned
+    `hour >= 12 → hour > 12` survivor); (5) resolution parity; (6) `withLlmMutators`
+    end-to-end; (7) the directive-bookkeeper deep path resolves, the legacy-`llm`
+    alias installs, and a `// Stryker disable next-line llm` yields an Ignored
+    `LlmComparison` mutant with zero `warn()` calls; (8) the real `IncrementalDiffer`
+    reuses a report row migrated to the live name and re-runs a legacy `llm` row.
+    A `bun run canary` script runs it in isolation, and `.github/workflows/ci.yml`
+    runs the six gates in order then the canary as a final named "per-version
+    monkeypatch canary" step. The detailed proofs (`injection-proof`,
+    `llm-placement-proof`, `llm-directive-proof`, `incremental-migration-proof`)
+    remain for regression depth.
     (Open-question #5: Stryker is pinned to
     exactly 9.6.1; the workflow carries a commented matrix stub to widen the range.)
   - **Cold-run non-determinism documented + frozen-set mode shipped** (§3.4). The
@@ -755,11 +860,13 @@ load-bearing proof.
     returns empty candidates WITHOUT calling the network or writing the cache — a
     deterministic, free CI gate that re-scores only the already-cached frozen set
     (open-question #6).
-  - **Disable-comment honoring is a CLEAN WIN with no code** (§5): Stryker's own
-    `DirectiveBookkeeper` is constructed with the live injected `allMutators`, so
-    `// Stryker disable all` AND `// Stryker disable <OurName>` / `disable llm` both
-    suppress ours for free; only pre-existing built-in-name disables don't cover us
-    (expected equivalent re-surfacing) (open-question #7).
+  - **Disable-comment honoring** (§5): a CLEAN WIN with no code for `all`, our bare
+    heuristic names and every `Llm<Category>` — Stryker's own `DirectiveBookkeeper`
+    is constructed with the live injected `allMutators`, so those suppress ours for
+    free — plus the in-memory alias patch (`src/directive-alias.ts`) that makes a
+    legacy plain `llm` cover every category, both under the canary; only
+    pre-existing built-in-name disables don't cover us (expected equivalent
+    re-surfacing) (open-question #7).
   - **The mode-downgrade follow-up fix** (`src/driver/plan.ts`): the `replace →
     augment` downgrade now counts the deferred dynamic-LLM mutator
     (`gate.runDynamicLLM`), so `--ours-only` + dynamicLLM-on (heuristics-off) keeps

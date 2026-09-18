@@ -43,6 +43,7 @@ function entry(over: Partial<ParsedEntry>): ParsedEntry {
     return {
         node: FAKE_NODE,
         mutatorName: 'llm/boundary',
+        category: 'LlmComparison',
         replacement: 'hour > 12',
         original: 'hour >= 12',
         rationale: 'Off-by-one on the afternoon boundary.',
@@ -71,6 +72,34 @@ describe('correlateEnrichment', () => {
             tag: 'boundary',
             rationale: 'Off-by-one on the afternoon boundary.',
         });
+    });
+
+    it('correlates a category-named result (LlmComparison) to its map entry', () => {
+        const map = mapFor([entry({})]);
+        const enrichment = correlateEnrichment(
+            [mutant({ id: 'm1', mutatorName: 'LlmComparison' })],
+            map,
+        );
+        expect(enrichment.get('m1')?.tag).toBe('boundary');
+    });
+
+    it('picks the entry of the result’s OWN category on a shared span', () => {
+        const map = mapFor([
+            entry({ mutatorName: 'llm/cmp', category: 'LlmComparison', original: 'A' }),
+            entry({ mutatorName: 'llm/log', category: 'LlmLogical', original: 'B' }),
+        ]);
+        const enrichment = correlateEnrichment(
+            [
+                mutant({ id: 'c', mutatorName: 'LlmComparison' }),
+                mutant({ id: 'l', mutatorName: 'LlmLogical' }),
+                // A category with no entry at this span falls back to the first entry.
+                mutant({ id: 'n', mutatorName: 'LlmNumber' }),
+            ],
+            map,
+        );
+        expect(enrichment.get('c')?.tag).toBe('cmp');
+        expect(enrichment.get('l')?.tag).toBe('log');
+        expect(enrichment.get('n')?.tag).toBe('cmp');
     });
 
     it('skips non-llm mutants (heuristic / built-in)', () => {

@@ -1,13 +1,18 @@
 /*
- * Offline unit tests for the injected dynamic-LLM `NodeMutator`.
+ * Offline unit tests for the injected dynamic-LLM `NodeMutator`s.
  *
- * The mutator is a pure sync map lookup, so these tests need NO Stryker and NO
- * network. They hand it (a) a HAND-BUILT `(absFileName, locKey) → ParsedEntry[]`
+ * The mutators are pure sync map lookups, so these tests need NO Stryker and NO
+ * network. They hand them (a) a HAND-BUILT `(absFileName, locKey) → ParsedEntry[]`
  * map and (b) a minimal FAKE NodePath exposing only the two fields the mutator
  * reads — `path.node.loc` and `path.hub.file.opts.filename`. A bare
  * `babel.traverse` does NOT populate `hub` (only Stryker's `new File({filename})`
  * wrap does), so a real traverse cannot exercise the file-keying; the fake path
- * does, which is the whole point of the single-mutator design.
+ * does.
+ *
+ * NAMING: `createLlmMutators(map)` returns one `NodeMutator` per registered name
+ * — the legacy no-op `llm` wildcard plus one per `Llm<Category>` — and each
+ * category mutator yields ONLY the entries of its own category, so a directive
+ * naming one category leaves the others on the same span live.
  */
 
 import { describe, expect, it } from 'bun:test';
@@ -21,10 +26,19 @@ import {
     locKeyFromBabelLoc,
     type ParsedEntry,
 } from '../../src/pipeline/llm-map';
-import { createLlmMutator, LLM_MUTATOR_NAME } from '../../src/mutators/llm-mutator';
+import { LLM_CATEGORIES, type LlmCategory } from '../../src/pipeline/classify';
+import {
+    createLlmMutators,
+    isLlmMutatorName,
+    LLM_MUTATOR_NAME,
+    LLM_MUTATOR_NAMES,
+} from '../../src/mutators/llm-mutator';
 import { parseReplacementFragment } from '../../src/pipeline/parse-fragment';
-import type { NodePath } from '../../src/mutators/types';
+import type { NodeMutator, NodePath } from '../../src/mutators/types';
 import type { Replacement, SourceRange } from '../../src/seam/types';
+
+/** The category the hand-built fixtures default to. */
+const DEFAULT_CATEGORY: LlmCategory = 'LlmTernary';
 
 /** A 0-based Stryker range spanning a single span on one line. */
 function range(line: number, c0: number, c1: number): SourceRange {
@@ -54,12 +68,29 @@ function singleEntryMap(absFile: string, locKey: string, entry: ParsedEntry): Ll
     return new Map([[absFile, new Map([[locKey, [entry]]])]]);
 }
 
-function entryFor(replacement: string, mutatorName: string): ParsedEntry {
+function entryFor(
+    replacement: string,
+    mutatorName: string,
+    category: LlmCategory = DEFAULT_CATEGORY,
+): ParsedEntry {
     const node = parseReplacementFragment(replacement);
     if (node === undefined) {
         throw new Error(`fixture replacement did not parse: ${replacement}`);
     }
-    return { node, mutatorName, replacement, original: 'orig' };
+    return { node, mutatorName, category, replacement, original: 'orig' };
+}
+
+/** The category mutator named `category` out of `createLlmMutators(map)`. */
+function mutatorFor(
+    map: LlmMutatorMap,
+    category: string = DEFAULT_CATEGORY,
+    log?: (line: string) => void,
+): NodeMutator {
+    const found = createLlmMutators(map, log).find(m => m.name === category);
+    if (found === undefined) {
+        throw new Error(`no mutator named ${category}`);
+    }
+    return found;
 }
 
 const { parse, traverse } = babel as {
@@ -85,10 +116,40 @@ function pathFor(code: string, predicate: (path: NodePath) => boolean, filename:
     return found;
 }
 
-describe('createLlmMutator', () => {
-    it('has the Stryker-facing name "llm"', () => {
-        expect(createLlmMutator(new Map()).name).toBe(LLM_MUTATOR_NAME);
+describe('LLM_MUTATOR_NAMES / isLlmMutatorName', () => {
+    it('is the legacy wildcard followed by every category, in taxonomy order (17 names)', () => {
         expect(LLM_MUTATOR_NAME).toBe('llm');
+        expect(LLM_MUTATOR_NAMES).toEqual([LLM_MUTATOR_NAME, ...LLM_CATEGORIES]);
+        expect(LLM_MUTATOR_NAMES).toHaveLength(17);
+    });
+
+    it('matches exactly (case-sensitive) the registered names and nothing else', () => {
+        expect(isLlmMutatorName('llm')).toBe(true);
+        expect(isLlmMutatorName('LlmComparison')).toBe(true);
+        expect(isLlmMutatorName('LlmOther')).toBe(true);
+        expect(isLlmMutatorName('Llm')).toBe(false);
+        expect(isLlmMutatorName('llm/off-by-one')).toBe(false);
+        expect(isLlmMutatorName('NumberLiteralValue')).toBe(false);
+        expect(isLlmMutatorName('llmcomparison')).toBe(false);
+    });
+});
+
+describe('createLlmMutators', () => {
+    it('returns exactly LLM_MUTATOR_NAMES in order, regardless of the map contents', () => {
+        expect(createLlmMutators(new Map()).map(m => m.name)).toEqual([...LLM_MUTATOR_NAMES]);
+        const abs = '/abs/foo.ts';
+        const key = locKeyFromRange(range(0, 4, 9));
+        const map = singleEntryMap(abs, key, entryFor('a > b ? 1 : 0', 'llm/flip'));
+        expect(createLlmMutators(map).map(m => m.name)).toEqual([...LLM_MUTATOR_NAMES]);
+    });
+
+    it('the legacy `llm` mutator yields nothing for any path (a registered no-op)', () => {
+        const abs = '/abs/foo.ts';
+        const key = locKeyFromRange(range(0, 4, 9));
+        const map = singleEntryMap(abs, key, entryFor('a > b ? 1 : 0', 'llm/flip'));
+        const legacy = mutatorFor(map, LLM_MUTATOR_NAME);
+        expect([...legacy.mutate(fakePath(abs, babelRange(1, 4, 9)))]).toHaveLength(0);
+        expect([...legacy.mutate(fakePathNoLoc(abs))]).toHaveLength(0);
     });
 
     it('HIT: yields the entry node when (filename, loc) match, and a FRESH node per iteration', () => {
@@ -96,7 +157,7 @@ describe('createLlmMutator', () => {
         // Stryker 0-based line 0 → babel-1-based key line 1.
         const key = locKeyFromRange(range(0, 4, 9));
         const map = singleEntryMap(abs, key, entryFor('a > b ? 1 : 0', 'llm/flip'));
-        const mutator = createLlmMutator(map);
+        const mutator = mutatorFor(map);
 
         const path = fakePath(abs, babelRange(1, 4, 9));
         const first = [...mutator.mutate(path)];
@@ -108,11 +169,30 @@ describe('createLlmMutator', () => {
         expect(second[0]).not.toBe(first[0]);
     });
 
+    it('CATEGORY FILTER: each category mutator yields only its own entries at a shared span', () => {
+        const abs = '/abs/foo.ts';
+        const key = locKeyFromRange(range(0, 4, 9));
+        const e1 = entryFor('a > b ? 1 : 0', 'llm/flip', 'LlmTernary');
+        const e2 = entryFor('a < b ? 1 : 0', 'llm/swap', 'LlmComparison');
+        const map: LlmMutatorMap = new Map([[abs, new Map([[key, [e1, e2]]])]]);
+        const path = fakePath(abs, babelRange(1, 4, 9));
+
+        const byName = new Map(createLlmMutators(map).map(m => [m.name, [...m.mutate(path)]]));
+        expect(byName.get('LlmTernary')).toHaveLength(1);
+        expect(byName.get('LlmComparison')).toHaveLength(1);
+        expect(byName.get('LlmTernary')![0]).not.toBe(byName.get('LlmComparison')![0]);
+        for (const name of LLM_MUTATOR_NAMES) {
+            if (name !== 'LlmTernary' && name !== 'LlmComparison') {
+                expect(byName.get(name)).toHaveLength(0);
+            }
+        }
+    });
+
     it('MISS (wrong loc): same file, non-matching loc yields nothing', () => {
         const abs = '/abs/foo.ts';
         const key = locKeyFromRange(range(0, 4, 9));
         const map = singleEntryMap(abs, key, entryFor('a > b ? 1 : 0', 'llm/flip'));
-        const mutator = createLlmMutator(map);
+        const mutator = mutatorFor(map);
 
         // Live loc at babel line 2 — no key for it.
         expect([...mutator.mutate(fakePath(abs, babelRange(2, 4, 9)))]).toHaveLength(0);
@@ -122,18 +202,18 @@ describe('createLlmMutator', () => {
         const abs = '/abs/foo.ts';
         const key = locKeyFromRange(range(0, 4, 9));
         const map = singleEntryMap(abs, key, entryFor('a > b ? 1 : 0', 'llm/flip'));
-        const mutator = createLlmMutator(map);
+        const mutator = mutatorFor(map);
 
         expect([...mutator.mutate(fakePath('/abs/OTHER.ts', babelRange(1, 4, 9)))]).toHaveLength(0);
     });
 
-    it('MULTI-CANDIDATE: a loc with 2+ entries yields 2+ distinct nodes in stored order', () => {
+    it('MULTI-CANDIDATE: a loc with 2+ same-category entries yields 2+ distinct nodes in stored order', () => {
         const abs = '/abs/foo.ts';
         const key = locKeyFromRange(range(0, 4, 9));
         const e1 = entryFor('a > b ? 1 : 0', 'llm/flip');
         const e2 = entryFor('a < b ? 1 : 0', 'llm/swap');
         const map: LlmMutatorMap = new Map([[abs, new Map([[key, [e1, e2]]])]]);
-        const mutator = createLlmMutator(map);
+        const mutator = mutatorFor(map);
 
         const yielded = [...mutator.mutate(fakePath(abs, babelRange(1, 4, 9)))];
         expect(yielded).toHaveLength(2);
@@ -146,7 +226,7 @@ describe('createLlmMutator', () => {
         const abs = '/abs/foo.ts';
         const key = locKeyFromRange(range(0, 4, 9));
         const map = singleEntryMap(abs, key, entryFor('a > b ? 1 : 0', 'llm/flip'));
-        const mutator = createLlmMutator(map);
+        const mutator = mutatorFor(map);
 
         expect([...mutator.mutate(fakePathNoLoc(abs))]).toHaveLength(0);
     });
@@ -155,7 +235,7 @@ describe('createLlmMutator', () => {
         const abs = '/abs/foo.ts';
         const key = locKeyFromRange(range(0, 4, 9));
         const map = singleEntryMap(abs, key, entryFor('a > b ? 1 : 0', 'llm/flip'));
-        const mutator = createLlmMutator(map);
+        const mutator = mutatorFor(map);
 
         expect([...mutator.mutate(fakePath(undefined, babelRange(1, 4, 9)))]).toHaveLength(0);
     });
@@ -170,26 +250,33 @@ describe('createLlmMutator', () => {
             mutatorName: 'llm/off-by-one',
         };
         const { map } = buildLlmMutatorMap([replacement]);
-        const mutator = createLlmMutator(map);
+        // `x + 1 → x - 1` classifies as LlmArithmetic; that mutator serves it.
+        const mutator = mutatorFor(map, 'LlmArithmetic');
 
         // Babel line 2 (== Stryker 1 + 1) HITS.
         expect([...mutator.mutate(fakePath(abs, babelRange(2, 0, 5)))]).toHaveLength(1);
         // Babel line 1 MISSES (proves the +1 conversion is applied, not the raw value).
         expect([...mutator.mutate(fakePath(abs, babelRange(1, 0, 5)))]).toHaveLength(0);
+        // No other category mutator serves it.
+        expect([
+            ...mutatorFor(map, 'LlmNumber').mutate(fakePath(abs, babelRange(2, 0, 5))),
+        ]).toHaveLength(0);
     });
 
-    it('lifts a shorthand object candidate at the property-key location', () => {
+    it('lifts a shorthand object candidate at the property-key location (own category only)', () => {
         const file = '/abs/shorthand.ts';
         const path = pathFor('const output = { signal };', p => p.isObjectExpression(), file);
         const property = (path.node as { properties: Node[] }).properties[0]! as { key: Node };
         const key = locKeyFromBabelLoc(property.key.loc!);
-        const map = singleEntryMap(file, key, entryFor('null', 'llm/shorthand'));
-        const out = [...createLlmMutator(map).mutate(path)];
+        const map = singleEntryMap(file, key, entryFor('null', 'llm/shorthand', 'LlmConstant'));
+        const out = [...mutatorFor(map, 'LlmConstant').mutate(path)];
         expect(out).toHaveLength(1);
         expect((out[0] as { properties: Node[] }).properties[0]!.type).toBe('ObjectProperty');
         expect(
             (out[0] as { properties: Array<{ shorthand?: boolean }> }).properties[0]!.shorthand,
         ).toBe(false);
+        // The shorthand branch filters by category too.
+        expect([...mutatorFor(map, 'LlmIdentifier').mutate(path)]).toHaveLength(0);
     });
 
     it('drops a const-binding assignment candidate and reports the reason', () => {
@@ -205,7 +292,9 @@ describe('createLlmMutator', () => {
         const key = locKeyFromBabelLoc(path.node.loc!);
         const notes: string[] = [];
         const map = singleEntryMap(file, key, entryFor('locked = 2', 'llm/const'));
-        expect([...createLlmMutator(map, line => notes.push(line)).mutate(path)]).toHaveLength(0);
+        expect([
+            ...mutatorFor(map, DEFAULT_CATEGORY, line => notes.push(line)).mutate(path),
+        ]).toHaveLength(0);
         expect(notes).toHaveLength(1);
         expect(notes[0]).toContain('immutable binding locked');
     });
@@ -243,7 +332,7 @@ describe('createLlmMutator', () => {
                 locKeyFromBabelLoc(path.node.loc!),
                 entryFor(fixture.replacement, 'llm/write'),
             );
-            expect([...createLlmMutator(map).mutate(path)]).toHaveLength(fixture.expected);
+            expect([...mutatorFor(map).mutate(path)]).toHaveLength(fixture.expected);
         }
     });
 
@@ -256,7 +345,9 @@ describe('createLlmMutator', () => {
             locKeyFromBabelLoc(path.node.loc!),
             entryFor('({ replacement: 1 })', 'llm/invalid-place'),
         );
-        expect([...createLlmMutator(map, line => notes.push(line)).mutate(path)]).toHaveLength(0);
+        expect([
+            ...mutatorFor(map, DEFAULT_CATEGORY, line => notes.push(line)).mutate(path),
+        ]).toHaveLength(0);
         expect(notes).toHaveLength(1);
     });
 
@@ -278,7 +369,7 @@ describe('createLlmMutator', () => {
             locKeyFromBabelLoc(path.node.loc!),
             entryFor('null', 'llm/babel8-object-value'),
         );
-        expect([...createLlmMutator(map).mutate(babel8Path)]).toHaveLength(1);
+        expect([...mutatorFor(map).mutate(babel8Path)]).toHaveLength(1);
     });
 
     it('preserves undefined scalar and string listKey placement paths', () => {
@@ -307,7 +398,7 @@ describe('createLlmMutator', () => {
                 locKeyFromBabelLoc(path.node.loc!),
                 entryFor('null', 'llm/list-key'),
             );
-            expect([...createLlmMutator(map).mutate(shaped)]).toHaveLength(1);
+            expect([...mutatorFor(map).mutate(shaped)]).toHaveLength(1);
         }
     });
 });

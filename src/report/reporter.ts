@@ -32,7 +32,7 @@
 import type { MutantResult } from '@stryker-mutator/api/core';
 
 import type { CostSnapshot } from '../llm/index';
-import { heuristicMutators } from '../mutators/index';
+import { heuristicMutators, isLlmMutatorName } from '../mutators/index';
 
 /** The `llm/` mutator-name prefix (mirrors propose.ts PROPOSE_MUTATOR_PREFIX). */
 export const LLM_PREFIX = 'llm';
@@ -102,22 +102,56 @@ export interface ReportOutput {
     filtered: FilteredReport;
 }
 
-/** True when a mutator name is one of OURS (heuristic/* or llm/*). */
+/** True when a mutator name is one of OURS (a registered LLM name, llm/*, heuristic/* or a bare heuristic). */
 export function isOurMutant(mutatorName: string): boolean {
     return (
-        mutatorName === LLM_PREFIX ||
+        isLlmMutatorName(mutatorName) ||
         mutatorName.startsWith(`${LLM_PREFIX}/`) ||
         mutatorName.startsWith('heuristic/') ||
         HEURISTIC_NAMES.has(mutatorName)
     );
 }
 
-/** The effective mutator name: prefer the enriched `llm/<tag>` over coarse `llm`. */
+/**
+ * The effective mutator name: Stryker's own name (`Llm<Category>`, or legacy
+ * `llm`) suffixed with the enriched `/<tag>` when the pre-pass knows it — e.g.
+ * `LlmComparison/off-by-one`.
+ */
 function effectiveName(result: MutantResult, enrichment?: MutantEnrichment): string {
     if (enrichment?.tag !== undefined && enrichment.tag.length > 0) {
-        return `${LLM_PREFIX}/${enrichment.tag}`;
+        return `${result.mutatorName}/${enrichment.tag}`;
     }
     return result.mutatorName;
+}
+
+/**
+ * The per-category summary line: every LLM mutator name present, total desc
+ * then name asc, `(survived n)` only when n > 0. `undefined` when no LLM mutant
+ * exists (the line is omitted).
+ */
+function categoryLine(ours: readonly MutantResult[]): string | undefined {
+    const totals = new Map<string, { total: number; survived: number }>();
+    for (const r of ours) {
+        if (!isLlmMutatorName(r.mutatorName)) {
+            continue;
+        }
+        const entry = totals.get(r.mutatorName) ?? { total: 0, survived: 0 };
+        entry.total += 1;
+        if (r.status === 'Survived') {
+            entry.survived += 1;
+        }
+        totals.set(r.mutatorName, entry);
+    }
+    if (totals.size === 0) {
+        return undefined;
+    }
+    const parts = [...totals]
+        .toSorted((a, b) => b[1].total - a[1].total || (a[0] < b[0] ? -1 : 1))
+        .map(
+            ([name, { total, survived }]) =>
+                `${name} ${String(total)}${survived > 0 ? ` (survived ${String(survived)})` : ''}`,
+        );
+    return `LLM mutants by category: ${parts.join(', ')}`;
 }
 
 /** Stable sort key: fileName, then start line, then start column. */
@@ -183,10 +217,12 @@ export function formatReport(
     const noCoverage = ours.filter(r => r.status === 'NoCoverage').length;
     const timeout = ours.filter(r => r.status === 'Timeout').length;
 
+    const byCategory = categoryLine(ours);
     const summaryText = [
         `Injected mutants: ${String(ours.length)} ` +
             `(killed ${String(killed)}, survived ${String(survived.length)}, ` +
             `no-coverage ${String(noCoverage)}, timeout ${String(timeout)})`,
+        ...(byCategory === undefined ? [] : [byCategory]),
         'NOTE: the standard Stryker score is BLENDED — it includes these injected ' +
             'mutants and is NOT comparable to a vanilla Stryker mutation score.',
         `Total LLM cost: $${cost.totalUsd.toFixed(2)} across ${String(cost.calls)} calls`,

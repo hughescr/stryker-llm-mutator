@@ -14,7 +14,10 @@ export {
 } from './propose';
 
 // ── Structural function fingerprint + comment stripper (cache identity) ──────
-export { functionFingerprint, stripComments } from './fingerprint';
+export { functionFingerprint, parseExpressionTolerant, stripComments } from './fingerprint';
+
+// ── Deterministic Llm<Category> classifier (mutant naming, post-cache) ───────
+export { classifyMutation, classifyNodes, LLM_CATEGORIES, type LlmCategory } from './classify';
 
 export {
     applyFilters,
@@ -33,6 +36,7 @@ export {
     type BabelLoc,
     type BuildLlmMutatorMapResult,
     buildLlmMutatorMap,
+    countEntriesByCategory,
     type DroppedReplacement,
     type LlmMutatorMap,
     locKeyFromBabelLoc,

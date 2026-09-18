@@ -50,6 +50,7 @@
 import process from 'node:process';
 import { resolve } from 'node:path';
 
+import { expandExcludedMutations, installLlmDirectiveAliasIntoStryker } from './directive-alias';
 import { injectMutators } from './injection';
 import { createProvider } from './llm/factory';
 import { CostAccumulator, ResponseCache } from './llm/index';
@@ -172,15 +173,26 @@ export async function withLlmMutators<T extends WithLlmMutatorsConfig>(
 
     // Return a CLEAN config: Stryker sees no unknown `llmMutator` key, and the
     // returned object is stamped so a re-call is a no-op.
-    return cleanConfig(config);
+    const clean = cleanConfig(config);
+    // [Finding 1] Stryker checks `excludedMutations` by exact, case-sensitive
+    // name; a bare `llm` there must also exclude every `Llm<Category>` mutant. Only
+    // on the dynamicLLM path — a heuristics-only run returns the list untouched.
+    const strykerOptions = clean as { excludedMutations?: unknown };
+    if (gate.runDynamicLLM && Array.isArray(strykerOptions.excludedMutations)) {
+        strykerOptions.excludedMutations = expandExcludedMutations(
+            strykerOptions.excludedMutations as string[],
+        );
+    }
+    return clean;
 }
 
 /**
  * Run the dynamic-LLM pre-pass (credential check → budgeted provider → read mutate
- * sources → buildLlmMutator → augment-inject the single `llm` mutator) and stash
- * the cost + map into the runtime-state singleton for the Reporter plugin. This is
- * the `run.ts` step (3)+(4) MINUS `new Stryker()` — the wrapper never constructs
- * Stryker; stock `stryker run` does, after config load.
+ * sources → buildLlmMutator → install the legacy-`llm` directive alias →
+ * augment-inject the 17 LLM mutators) and stash the cost + map into the
+ * runtime-state singleton for the Reporter plugin. This is the `run.ts` step
+ * (3)+(4) MINUS `new Stryker()` — the wrapper never constructs Stryker; stock
+ * `stryker run` does, after config load.
  *
  * Node-only (pulls the Anthropic SDK via createProvider) — coverage-exempt; the
  * underlying buildLlmMutator/pre-pass logic is covered offline with a MockProvider.
@@ -224,7 +236,16 @@ async function runDynamicLlmPrePass(
         cache,
         frozen,
     });
-    injectMutators([built.mutator], { mode: 'augment' });
+    // The bookkeeper alias makes a plain `// Stryker disable … llm` cover every
+    // `Llm<Category>`; install it BEFORE the first instrumentation. Its own
+    // failure mode is a loud warning, never a throw.
+    await installLlmDirectiveAliasIntoStryker(log);
+    const injected = injectMutators(built.mutators, { mode: 'augment' });
+    const [wildcard, ...categories] = injected.injectedNames;
+    log(
+        `stryker-llm: injected ${String(injected.injectedNames.length)} LLM mutator name(s): ` +
+            `${wildcard ?? ''} (wildcard), ${categories.join(', ')}`,
+    );
 
     // Stash for the Reporter plugin (same process, read at report time).
     setRunCost(built.costSnapshot);

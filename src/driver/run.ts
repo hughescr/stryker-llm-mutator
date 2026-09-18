@@ -7,9 +7,10 @@
  *   (2) build the PURE run plan (`buildRunPlan`) — gate switches, select
  *       heuristics, map flags → Stryker options, decide injection mode;
  *   (3) dynamicLLM gating: credential fail-fast, then the M3 async pre-pass that
- *       targets → batched propose → filters → builds the precomputed map → ONE
- *       injected synchronous `llm` LLMMutator;
- *   (4) `injectMutators(selected, { mode })` into the deep-imported `allMutators`;
+ *       targets → batched propose → filters → builds the precomputed map → the
+ *       17 injected synchronous LLM mutators (`llm` wildcard + 16 categories);
+ *   (4) install the legacy-`llm` directive alias (dynamic-LLM only), then
+ *       `injectMutators(selected, { mode })` into the deep-imported `allMutators`;
  *   (5) `process.chdir(projectDir)` so Stryker resolves config/target/reporters
  *       from the project root (exactly as m0 does);
  *   (6) construct `new Stryker(partialOptions)` and `await runMutationTest()`;
@@ -38,6 +39,7 @@ import { dirname, resolve } from 'node:path';
 import { Stryker } from '@stryker-mutator/core';
 import type { MutantResult, PartialStrykerOptions } from '@stryker-mutator/api/core';
 
+import { installLlmDirectiveAliasIntoStryker } from '../directive-alias';
 import { injectMutators } from '../injection';
 import { createProvider } from '../llm/factory';
 import { CostAccumulator, ResponseCache } from '../llm/index';
@@ -89,6 +91,10 @@ function printPlan(plan: RunPlan, log: LogFn): void {
             ? `injecting ${String(names.length)} heuristic mutator(s): ${names.join(', ')}`
             : 'no custom heuristic mutators selected',
     );
+    const excluded = plan.strykerOptions.excludedMutations;
+    if (excluded !== undefined) {
+        log(`excludedMutations: llm → expanded to ${String(excluded.length)} name(s)`);
+    }
 }
 
 /**
@@ -104,10 +110,14 @@ export async function runLlmMutation(
     log: LogFn = defaultLog,
 ): Promise<RunLlmMutationResult> {
     // (1) Read the target config (fills all defaults; absent block → heuristics-on).
-    const { config, configFilePath } = await readTargetConfig(opts.projectDir, opts.configFile);
+    //     `excludedMutations` is surfaced so the plan can expand a bare `llm`.
+    const { config, configFilePath, excludedMutations } = await readTargetConfig(
+        opts.projectDir,
+        opts.configFile,
+    );
 
     // (2) Build the pure plan.
-    const plan = buildRunPlan(opts, config, configFilePath);
+    const plan = buildRunPlan(opts, config, configFilePath, excludedMutations);
     printPlan(plan, log);
 
     // (3) DynamicLLM gating: credential fail-fast (real), then the M3 pre-pass.
@@ -119,8 +129,8 @@ export async function runLlmMutation(
         assertLlmCredentials(config);
         // Construct the provider, wrap it with cache + cost + budget enforcement,
         // read the mutate-glob sources, and run the async pre-pass → precomputed
-        // map → ONE injected `llm` LLMMutator (the seam invariant: all LLM work is
-        // the pre-pass; the injected mutator is synchronous).
+        // map → the 17 injected LLM mutators (the seam invariant: all LLM work is
+        // the pre-pass; the injected mutators are synchronous).
         const cost = new CostAccumulator();
         const cache = new ResponseCache(resolve(plan.projectDir, config.cacheDir));
         // FROZEN-SET / CI-gating mode: `--frozen` (CLI) overrides config
@@ -158,7 +168,7 @@ export async function runLlmMutation(
             cache,
             frozen,
         });
-        plan.injectedMutators.push(built.mutator);
+        plan.injectedMutators.push(...built.mutators);
         costSnapshot = built.costSnapshot;
         llmMap = built.map;
         log(
@@ -173,7 +183,13 @@ export async function runLlmMutation(
         return { plan };
     }
 
-    // (4) Inject our mutators into the shared `allMutators` registry.
+    // (4) Inject our mutators into the shared `allMutators` registry. On a
+    //     dynamic-LLM run, first install the bookkeeper alias so a plain
+    //     `// Stryker disable … llm` covers every `Llm<Category>` (a loud
+    //     warning, never a throw, if the seam is missing).
+    if (plan.gate.runDynamicLLM) {
+        await installLlmDirectiveAliasIntoStryker(log);
+    }
     if (plan.injectedMutators.length > 0) {
         injectMutators(plan.injectedMutators, { mode: plan.mode });
     }

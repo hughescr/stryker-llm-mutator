@@ -12,6 +12,7 @@ import { resolve } from 'node:path';
 
 import {
     buildLlmMutatorMap,
+    countEntriesByCategory,
     locKeyFromBabelLoc,
     locKeyFromRange,
 } from '../../src/pipeline/llm-map';
@@ -103,5 +104,46 @@ describe('buildLlmMutatorMap', () => {
         ]);
         expect(dropped).toHaveLength(1);
         expect(map.get('/abs/foo.ts')!.get('1:4-1:9')).toHaveLength(1);
+    });
+
+    it('stamps a deterministic Llm<Category> on each entry from (original, replacement)', () => {
+        const { map } = buildLlmMutatorMap([
+            repl({ original: 'x + 1', replacement: 'x - 1', mutatorName: 'llm/a' }),
+            repl({ original: 'x + 1', replacement: 'x + 1 > 0', mutatorName: 'llm/b' }),
+            repl({ original: 'x + 1', replacement: '!(x + 1)', mutatorName: 'llm/c' }),
+            repl({ original: 'x + 1', replacement: 'x + 1 ?? y', mutatorName: 'llm/d' }),
+        ]);
+        const entries = map.get('/abs/foo.ts')!.get('1:4-1:9')!;
+        expect(entries.map(e => e.category)).toEqual([
+            'LlmArithmetic',
+            'LlmComparison',
+            'LlmNegate',
+            'LlmNullish',
+        ]);
+        // The reporter tag is still carried alongside the category.
+        expect(entries.map(e => e.mutatorName)).toEqual(['llm/a', 'llm/b', 'llm/c', 'llm/d']);
+    });
+
+    it('falls back to LlmOther when the original does not parse as an expression', () => {
+        const { map, dropped } = buildLlmMutatorMap([
+            repl({ original: 'x +', replacement: 'x - 1' }),
+        ]);
+        expect(dropped).toHaveLength(0);
+        expect(map.get('/abs/foo.ts')!.get('1:4-1:9')![0]!.category).toBe('LlmOther');
+    });
+});
+
+describe('countEntriesByCategory', () => {
+    it('totals entries per category across files and spans (zero-count names omitted)', () => {
+        const { map } = buildLlmMutatorMap([
+            repl({ original: 'x + 1', replacement: 'x - 1' }),
+            repl({ original: 'x + 1', replacement: 'x * 1', range: range(3, 0, 3, 5) }),
+            repl({ original: 'x + 1', replacement: 'x + 2', fileName: '/abs/bar.ts' }),
+        ]);
+        const counts = countEntriesByCategory(map);
+        expect(counts.get('LlmArithmetic')).toBe(2);
+        expect(counts.get('LlmNumber')).toBe(1);
+        expect(counts.has('LlmOther')).toBe(false);
+        expect([...counts.values()].reduce((a, b) => a + b, 0)).toBe(3);
     });
 });

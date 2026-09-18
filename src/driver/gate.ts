@@ -42,10 +42,11 @@ import { proposeCacheIdentity } from '../pipeline/propose';
 import { runPrePass, type PrePassLogger } from '../pipeline/prepass';
 import {
     buildLlmMutatorMap,
+    countEntriesByCategory,
     type DroppedReplacement,
     type LlmMutatorMap,
 } from '../pipeline/llm-map';
-import { createLlmMutator } from '../mutators/llm-mutator';
+import { createLlmMutators } from '../mutators/llm-mutator';
 import type { NodeMutator } from '../mutators/index';
 import type { LlmMutatorConfig } from '../config';
 
@@ -253,10 +254,14 @@ export interface BuildLlmMutatorDeps {
     frozen?: boolean;
 }
 
-/** The outcome of {@link buildLlmMutator}: the injected mutator + run metadata. */
+/** The outcome of {@link buildLlmMutator}: the injected mutators + run metadata. */
 export interface BuildLlmMutatorResult {
-    /** The single `llm` NodeMutator to push onto `allMutators` (sync map lookup). */
-    mutator: NodeMutator;
+    /**
+     * The 17 LLM NodeMutators to push onto `allMutators` (sync map lookups): the
+     * no-op `llm` wildcard plus one per `Llm<Category>`, in `LLM_MUTATOR_NAMES`
+     * order, regardless of the map contents.
+     */
+    mutators: readonly NodeMutator[];
     /** The precomputed map (also drives the reporter's id→tag enrichment). */
     map: LlmMutatorMap;
     /** Final LLM cost snapshot for the reporter. */
@@ -275,7 +280,8 @@ export interface BuildLlmMutatorResult {
  *      (cache + budget + diminishing-returns all enforced inside);
  *   3. build the precomputed `(absFileName, locKey) → ParsedEntry[]` map from the
  *      survivors (`buildLlmMutatorMap`, statement-shaped drops logged);
- *   4. wrap it in ONE sync `createLlmMutator(map)` NodeMutator.
+ *   4. wrap it in the 17 sync `createLlmMutators(map)` NodeMutators (the no-op
+ *      `llm` wildcard + one per `Llm<Category>`, each serving its own entries).
  *
  * The driver calls {@link assertLlmCredentials} BEFORE constructing the provider,
  * so missing creds surface as a credentials error; this orchestrator assumes a
@@ -317,16 +323,21 @@ export async function buildLlmMutator(
         dropped.push(drop);
     }
     if (log !== undefined) {
+        const byCategory = [...countEntriesByCategory(map)]
+            .toSorted((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1))
+            .map(([name, n]) => `${name}=${String(n)}`)
+            .join(', ');
+        const categorySuffix = byCategory.length > 0 ? `; by category: ${byCategory}` : '';
         log(
             `LLM pre-pass: ${String(prePass.survivors.length)} survivor(s) → ` +
                 `${String(countEntries(map))} mutant candidate(s); ` +
                 `${String(dropped.length)} dropped; stop=${prePass.stopReason}; ` +
-                `cost $${prePass.cost.totalUsd.toFixed(2)} / ${String(prePass.cost.calls)} calls`,
+                `cost $${prePass.cost.totalUsd.toFixed(2)} / ${String(prePass.cost.calls)} calls${categorySuffix}`,
         );
     }
 
     return {
-        mutator: createLlmMutator(map, log),
+        mutators: createLlmMutators(map, log),
         map,
         costSnapshot: prePass.cost,
         droppedLog: dropped,

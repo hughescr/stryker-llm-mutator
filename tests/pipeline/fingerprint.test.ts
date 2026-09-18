@@ -9,7 +9,12 @@
 
 import { describe, expect, it } from 'bun:test';
 
-import { functionFingerprint, stripComments } from '../../src/pipeline/fingerprint';
+import {
+    expressionShape,
+    functionFingerprint,
+    parseExpressionTolerant,
+    stripComments,
+} from '../../src/pipeline/fingerprint';
 
 const BASE = `function clamp(value, max) {
     if (value > max) {
@@ -413,5 +418,29 @@ describe('stripComments', () => {
     it('does not mistake a comment-looking string for a comment', () => {
         const input = `function f() { return "http://x // not a comment"; }`;
         expect(stripComments(input)).toBe(input);
+    });
+});
+
+describe('parseExpressionTolerant', () => {
+    it('returns a node for the context errors a cut sub-expression cannot avoid', () => {
+        expect(parseExpressionTolerant('this.#x')?.type).toBe('MemberExpression');
+        expect(parseExpressionTolerant('super.x')?.type).toBe('MemberExpression');
+        expect(parseExpressionTolerant('yield x')?.type).toBe('YieldExpression');
+        expect(parseExpressionTolerant('new.target')?.type).toBe('MetaProperty');
+    });
+
+    it('returns undefined for a real syntax error', () => {
+        expect(parseExpressionTolerant('a +')).toBeUndefined();
+        expect(parseExpressionTolerant('')).toBeUndefined();
+    });
+
+    it('is the parse route expressionShape already used (same shape, same undefined)', () => {
+        for (const text of ['a + 1', 'this.#x', 'f(a, b)', 'a +']) {
+            const node = parseExpressionTolerant(text);
+            const shape = expressionShape(text);
+            expect(node === undefined).toBe(shape === undefined);
+        }
+        expect(expressionShape('a + 1')).toBe(expressionShape('(a + /* c */ 1)'));
+        expect(expressionShape('a + 1')).not.toBe(expressionShape('a - 1'));
     });
 });

@@ -13,7 +13,7 @@ import type { MutantResult } from '@stryker-mutator/api/core';
 
 import { formatReport, isOurMutant, type MutantEnrichment } from '../../src/report/reporter';
 import type { CostSnapshot } from '../../src/llm/index';
-import { heuristicMutators } from '../../src/mutators/index';
+import { heuristicMutators, LLM_MUTATOR_NAMES } from '../../src/mutators/index';
 
 /** Build a synthetic MutantResult with sensible defaults. */
 function mutant(over: Partial<MutantResult> & Pick<MutantResult, 'id'>): MutantResult {
@@ -41,6 +41,14 @@ describe('isOurMutant', () => {
     it('rejects built-in mutator names', () => {
         expect(isOurMutant('ArithmeticOperator')).toBe(false);
         expect(isOurMutant('BooleanLiteral')).toBe(false);
+    });
+
+    it('recognizes every registered LLM mutator name (llm + 16 categories), not the bare prefix', () => {
+        for (const name of LLM_MUTATOR_NAMES) {
+            expect(isOurMutant(name)).toBe(true);
+        }
+        expect(isOurMutant('Llm')).toBe(false);
+        expect(isOurMutant('LlmNope')).toBe(false);
     });
 
     it('tags EVERY registered heuristic mutator name (no catalog drift)', () => {
@@ -116,6 +124,22 @@ describe('formatReport — survivors', () => {
         expect(out.survivorsText).toContain('(classic boundary bug)');
     });
 
+    it('renders a category-named survivor as Llm<Category>/<tag>', () => {
+        const enrichment = new Map<string, MutantEnrichment>([
+            ['1', { original: 'a > 0', tag: 'off-by-one' }],
+        ]);
+        const out = formatReport(
+            [mutant({ id: '1', mutatorName: 'LlmComparison', replacement: 'a >= 0' })],
+            COST,
+            { enrichment },
+        );
+        expect(out.survivorsText).toContain('LlmComparison/off-by-one');
+        expect(out.filtered.mutants[0]!.mutatorName).toBe('LlmComparison/off-by-one');
+        // Without enrichment the bare category stands.
+        const bare = formatReport([mutant({ id: '1', mutatorName: 'LlmComparison' })], COST);
+        expect(bare.survivorsText).toContain('  LlmComparison  ');
+    });
+
     it('shows just the replacement when there is no enrichment original', () => {
         const out = formatReport([mutant({ id: '1', replacement: 'a - 1' })], COST);
         const line = out.survivorsText.split('\n')[1]!;
@@ -154,6 +178,28 @@ describe('formatReport — summary + cost', () => {
             calls: 0,
         });
         expect(out.summaryText).toContain('Total LLM cost: $0.00 across 0 calls');
+    });
+
+    it('adds a per-category line (count desc, survived only when > 0) right after the injected line', () => {
+        const results = [
+            mutant({ id: '1', mutatorName: 'LlmComparison', status: 'Survived' }),
+            mutant({ id: '2', mutatorName: 'LlmComparison', status: 'Killed' }),
+            mutant({ id: '3', mutatorName: 'LlmLogical', status: 'Killed' }),
+            mutant({ id: '4', mutatorName: 'NumberLiteralValue', status: 'Killed' }),
+            mutant({ id: '5', mutatorName: 'llm', status: 'Killed' }),
+            mutant({ id: '6', mutatorName: 'LlmNumber', status: 'Killed' }),
+            mutant({ id: '7', mutatorName: 'LlmNumber', status: 'Killed' }),
+        ];
+        const lines = formatReport(results, COST).summaryText.split('\n');
+        expect(lines[0]).toContain('Injected mutants: 7');
+        expect(lines[1]).toBe(
+            'LLM mutants by category: LlmComparison 2 (survived 1), LlmNumber 2, LlmLogical 1, llm 1',
+        );
+    });
+
+    it('omits the per-category line when no LLM mutant exists', () => {
+        const out = formatReport([mutant({ id: '1', mutatorName: 'NumberLiteralValue' })], COST);
+        expect(out.summaryText).not.toContain('by category');
     });
 });
 

@@ -15,14 +15,16 @@
  * LOCATION CONVERSION (the pitfall): the map's locKey is babel (1-based line /
  * 0-based column); `MutantResult.location` is the schema's 1-based line AND 1-based
  * column, so the babel column = `location.column - 1`. When a span carries multiple
- * candidates we cannot tell which result is which (Stryker collapses per-candidate
- * identity), so we attach the FIRST entry's metadata — coarse but honest; the
- * filtered artifact still lists every candidate.
+ * candidates, the result's `Llm<Category>` mutator name narrows the choice to the
+ * entry of its own category; among several SAME-category entries at one span we
+ * still cannot tell which result is which (Stryker collapses per-candidate
+ * identity), so the FIRST such entry's metadata is attached — coarse but honest;
+ * the filtered artifact still lists every candidate.
  */
 
 import type { MutantResult } from '@stryker-mutator/api/core';
 
-import { LLM_MUTATOR_NAME } from '../mutators/llm-mutator';
+import { isLlmMutatorName } from '../mutators/llm-mutator';
 import { type LlmMutatorMap, locKeyFromBabelLoc } from '../pipeline/llm-map';
 import type { MutantEnrichment } from './reporter';
 
@@ -43,7 +45,7 @@ export function correlateEnrichment(
 ): Map<string, MutantEnrichment> {
     const enrichment = new Map<string, MutantEnrichment>();
     for (const result of results) {
-        if (result.mutatorName !== LLM_MUTATOR_NAME) {
+        if (!isLlmMutatorName(result.mutatorName)) {
             continue;
         }
         const byLoc = map.get(result.fileName);
@@ -56,7 +58,11 @@ export function correlateEnrichment(
             end: { line: loc.end.line, column: loc.end.column - 1 },
         });
         const entries = byLoc.get(key);
-        const entry = entries?.[0];
+        // The result's `Llm<Category>` name picks the entry of its own category
+        // on a shared span; several SAME-category entries at one span still fall
+        // back to the first (Stryker collapses per-candidate identity). A legacy
+        // `llm` row (an old incremental report) matches no category → first entry.
+        const entry = entries?.find(e => e.category === result.mutatorName) ?? entries?.[0];
         if (entry === undefined) {
             continue;
         }

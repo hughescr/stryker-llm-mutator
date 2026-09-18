@@ -7,6 +7,8 @@
  */
 
 import { describe, expect, it } from 'bun:test';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 import {
@@ -95,6 +97,81 @@ describe('readTargetConfig — override', () => {
         );
         expect(configFilePath).toBe(path.join(dir('override'), 'custom-stryker.json'));
         expect(config.heuristics.enabled).toBe(false);
+    });
+});
+
+describe('readTargetConfig — excludedMutations surfaced (Finding 1)', () => {
+    /** Write a temp project with the given config file, run `fn`, clean up. */
+    async function withProject<T>(
+        fileName: string,
+        content: string,
+        fn: (projectDir: string) => Promise<T>,
+    ): Promise<T> {
+        const projectDir = await mkdtemp(path.join(tmpdir(), 'stryker-llm-excluded-'));
+        try {
+            await writeFile(path.join(projectDir, fileName), content, 'utf8');
+            return await fn(projectDir);
+        } finally {
+            await rm(projectDir, { recursive: true, force: true });
+        }
+    }
+
+    it('returns the list verbatim from a PLAIN stryker.config.json (no withLlmMutators)', async () => {
+        await withProject(
+            'stryker.config.json',
+            JSON.stringify({
+                mutate: ['src/**/*.ts'],
+                excludedMutations: ['llm', 'StringLiteral'],
+                llmMutator: { provider: 'mock', dynamicLLM: { enabled: true } },
+            }),
+            async projectDir => {
+                const result = await readTargetConfig(projectDir);
+                expect(result.excludedMutations).toEqual(['llm', 'StringLiteral']);
+                expect(result.configFilePath).toBe(path.join(projectDir, 'stryker.config.json'));
+                // llmMutator parsing is unchanged.
+                expect(result.config.dynamicLLM.enabled).toBe(true);
+                expect(result.config.provider).toBe('mock');
+            },
+        );
+    });
+
+    it('returns the list from a .mjs default export too', async () => {
+        await withProject(
+            'stryker.config.mjs',
+            "export default { mutate: ['src/**/*.ts'], excludedMutations: ['llm'] };\n",
+            async projectDir => {
+                const result = await readTargetConfig(projectDir);
+                expect(result.excludedMutations).toEqual(['llm']);
+            },
+        );
+    });
+
+    it('is undefined when the key is absent or not an array of strings', async () => {
+        await withProject(
+            'stryker.config.json',
+            JSON.stringify({ mutate: ['src/**/*.ts'] }),
+            async projectDir => {
+                const result = await readTargetConfig(projectDir);
+                expect(result.excludedMutations).toBeUndefined();
+                expect('excludedMutations' in result).toBe(false);
+            },
+        );
+        await withProject(
+            'stryker.config.json',
+            JSON.stringify({ excludedMutations: 'llm' }),
+            async projectDir => {
+                expect((await readTargetConfig(projectDir)).excludedMutations).toBeUndefined();
+            },
+        );
+        await withProject(
+            'stryker.config.json',
+            JSON.stringify({ excludedMutations: ['llm', 3] }),
+            async projectDir => {
+                expect((await readTargetConfig(projectDir)).excludedMutations).toBeUndefined();
+            },
+        );
+        // No config file at all → no key either.
+        expect('excludedMutations' in (await readTargetConfig(dir('empty-dir')))).toBe(false);
     });
 });
 

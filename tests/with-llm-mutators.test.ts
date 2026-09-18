@@ -10,9 +10,14 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 import { withLlmMutators } from '../src/with-llm-mutators';
 import { allMutators } from '../src/instrumenter-registry';
+import { LLM_MUTATOR_NAMES } from '../src/mutators/llm-mutator';
+import { LLM_CATEGORIES } from '../src/pipeline/classify';
 
 let pristine: typeof allMutators = [];
 
@@ -118,5 +123,77 @@ describe('withLlmMutators — heuristics path', () => {
         expect(result).toBeInstanceOf(Promise);
         const clean = await result;
         expect('llmMutator' in clean).toBe(false);
+    });
+
+    it('registers NO Llm* name and leaves excludedMutations untouched (heuristics-only is byte-identical)', async () => {
+        const excluded = ['llm', 'StringLiteral'];
+        const clean = await withLlmMutators(
+            { mutate: ['x'], excludedMutations: excluded },
+            { log: () => {} },
+        );
+        for (const name of LLM_MUTATOR_NAMES) {
+            expect(countByName(name)).toBe(0);
+        }
+        expect(clean.excludedMutations).toBe(excluded);
+        expect(clean.excludedMutations).toEqual(['llm', 'StringLiteral']);
+    });
+});
+
+describe('withLlmMutators — dynamicLLM path (offline: mock provider, empty project)', () => {
+    let projectDir = '';
+
+    beforeEach(async () => {
+        projectDir = await mkdtemp(join(tmpdir(), 'stryker-llm-wrapper-'));
+    });
+
+    afterEach(async () => {
+        await rm(projectDir, { recursive: true, force: true });
+    });
+
+    /** A dynamicLLM-on config over the mock provider (no network, no credentials). */
+    const dynamic = (extra: Record<string, unknown> = {}): Record<string, unknown> => ({
+        mutate: ['src/**/*.ts'],
+        llmMutator: {
+            provider: 'mock',
+            heuristics: { enabled: false },
+            dynamicLLM: { enabled: true },
+            cacheDir: '.cache',
+        },
+        ...extra,
+    });
+
+    it('registers the 17 LLM mutator names (llm wildcard + 16 categories) before instrumentation', async () => {
+        const lines: string[] = [];
+        await withLlmMutators(dynamic(), { log: line => lines.push(line), projectDir });
+        for (const name of LLM_MUTATOR_NAMES) {
+            expect(countByName(name)).toBe(1);
+        }
+        expect(allMutators.length).toBe(pristine.length + LLM_MUTATOR_NAMES.length);
+        expect(
+            lines.some(l =>
+                l.includes('injected 17 LLM mutator name(s): llm (wildcard), LlmComparison'),
+            ),
+        ).toBe(true);
+        // The directive alias installed without a warning.
+        expect(lines.some(l => l.includes('WARNING'))).toBe(false);
+    });
+
+    it("expands excludedMutations: ['llm'] on the returned clean config", async () => {
+        const clean = await withLlmMutators(
+            dynamic({ excludedMutations: ['llm', 'StringLiteral'] }),
+            { log: () => {}, projectDir },
+        );
+        expect(clean.excludedMutations).toEqual(['llm', 'StringLiteral', ...LLM_CATEGORIES]);
+        expect('llmMutator' in clean).toBe(false);
+    });
+
+    it("leaves an excludedMutations list without 'llm' as-is, and no list absent", async () => {
+        const clean = await withLlmMutators(dynamic({ excludedMutations: ['StringLiteral'] }), {
+            log: () => {},
+            projectDir,
+        });
+        expect(clean.excludedMutations).toEqual(['StringLiteral']);
+        const none = await withLlmMutators(dynamic(), { log: () => {}, projectDir });
+        expect('excludedMutations' in none).toBe(false);
     });
 });

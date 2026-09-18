@@ -11,7 +11,7 @@
  * WHAT IT PROVES — THE BUG REGRESSION: an LLM mutant whose replacement is a
  * parsed EXPRESSION (e.g. `hour > 12` for `hour >= 12`) now carries a
  * NODE-ALIGNED range equal to the `hour >= 12` BinaryExpression node, so when we
- * push `createLlmMutator(map)` onto Stryker's REAL `allMutators` and instrument a
+ * push `createLlmMutators(map)` onto Stryker's REAL `allMutators` and instrument a
  * fixture function through the REAL `transformBabel`, Stryker's expression
  * (ternary) placer accepts it and instrumentation COMPLETES — no
  * `statementMutantPlacer could not place mutants … expected node to be of a type
@@ -20,7 +20,7 @@
  * replacement at a statement position threw.
  *
  * INPUT (argv): [2] path to a bundled ESM module exporting `buildLlmMutatorMap` +
- * `createLlmMutator` (pre-bundled by the Bun test so Node can import past the
+ * `createLlmMutators` + `isLlmMutatorName` (pre-bundled by the Bun test so Node can import past the
  * repo's extensionless TS imports); [3] the fixture source; [4] its file name;
  * [5] a JSON-serialized `Replacement[]` (the survivors the Bun test produced via
  * the REAL propose → range-align path).
@@ -74,20 +74,20 @@ async function run() {
     // Bun test wraps them in a `builders` object (a bare re-export gets
     // tree-shaken to nothing).
     const { builders } = await import(pathToFileURL(bundlePath).href);
-    const { buildLlmMutatorMap, createLlmMutator } = builders;
+    const { buildLlmMutatorMap, createLlmMutators, isLlmMutatorName } = builders;
 
     // Stryker keys the per-file map by the ABSOLUTE filename it threads through
     // `path.hub.file.opts.filename`. The parser is given the same absolute path.
     const absFileName = path.resolve(fileName);
     const replacements = JSON.parse(replacementsJson).map(r => ({ ...r, fileName: absFileName }));
 
-    // Rebuild the precomputed map + the injected mutator IN-PROCESS (Node).
+    // Rebuild the precomputed map + the injected mutators IN-PROCESS (Node).
     const { map, dropped } = buildLlmMutatorMap(replacements);
-    const llmMutator = createLlmMutator(map);
+    const llmMutators = createLlmMutators(map);
 
     const before = allMutators.length;
-    // AUGMENT: push our llm mutator onto the REAL registry (alongside built-ins).
-    allMutators.push(llmMutator);
+    // AUGMENT: push our 17 LLM mutators onto the REAL registry (alongside built-ins).
+    allMutators.push(...llmMutators);
     const after = allMutators.length;
 
     // Drive Stryker's real pipeline with the DEFAULT mutators (no 4th arg), so it
@@ -116,7 +116,7 @@ async function run() {
 
     const collected = instrumented ? collector.mutants.map(m => m.toApiMutant()) : [];
     const ours = collected
-        .filter(m => m.mutatorName === 'llm')
+        .filter(m => isLlmMutatorName(m.mutatorName))
         .map(m => ({ id: m.id, mutatorName: m.mutatorName, replacement: m.replacement }));
 
     return {

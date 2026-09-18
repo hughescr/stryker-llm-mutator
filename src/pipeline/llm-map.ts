@@ -44,6 +44,8 @@ import { resolve } from 'node:path';
 import type { Node } from '@babel/types';
 
 import type { Replacement, SourceRange } from '../seam/types';
+import { classifyNodes, type LlmCategory } from './classify';
+import { parseExpressionTolerant } from './fingerprint';
 import { parseReplacementFragment } from './parse-fragment';
 
 /**
@@ -56,6 +58,13 @@ export interface ParsedEntry {
     node: Node;
     /** The per-candidate mutator name, e.g. `llm/off-by-one` (from propose.ts). */
     mutatorName: string;
+    /**
+     * The `Llm<Category>` Stryker mutator this entry is yielded under — chosen
+     * DETERMINISTICALLY from the parsed `(original, replacement)` pair
+     * (`classify.ts`), never from the model's free-text tag. `LlmOther` when
+     * the original does not parse as an expression.
+     */
+    category: LlmCategory;
     /** The replacement source text (re-parsed per yield for distinct node identity). */
     replacement: string;
     /** The original span text, carried for the reporter's survivor view. */
@@ -161,10 +170,20 @@ export function buildLlmMutatorMap(
             byLoc = new Map();
             map.set(absFileName, byLoc);
         }
+        // Classification happens HERE, strictly after the cache boundary: the
+        // proposal (cached or fresh) is untouched; only the map entry carries
+        // the category. `original` is the verbatim text of a real expression
+        // node (range-align enforces `isExpression`), so the parse is expected
+        // to succeed; a failure is the total fallback.
+        const originalNode = parseExpressionTolerant(r.original);
+        const category: LlmCategory =
+            originalNode === undefined ? 'LlmOther' : classifyNodes(originalNode, node);
+
         const entries = byLoc.get(locKey) ?? [];
         entries.push({
             node,
             mutatorName: r.mutatorName,
+            category,
             replacement: r.replacement,
             original: r.original,
             ...(r.rationale === undefined ? {} : { rationale: r.rationale }),
@@ -173,4 +192,20 @@ export function buildLlmMutatorMap(
     }
 
     return { map, dropped };
+}
+
+/**
+ * Count the map's entries per `Llm<Category>` (names with zero entries are
+ * absent). Used for the pre-pass log line and the per-category summary.
+ */
+export function countEntriesByCategory(map: LlmMutatorMap): ReadonlyMap<LlmCategory, number> {
+    const counts = new Map<LlmCategory, number>();
+    for (const byLoc of map.values()) {
+        for (const entries of byLoc.values()) {
+            for (const entry of entries) {
+                counts.set(entry.category, (counts.get(entry.category) ?? 0) + 1);
+            }
+        }
+    }
+    return counts;
 }

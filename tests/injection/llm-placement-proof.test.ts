@@ -174,8 +174,8 @@ describe('LLM placement proof — expression edit replaces an expression node (N
         await Bun.write(
             entryPath,
             "import { buildLlmMutatorMap } from '../src/pipeline/llm-map';\n" +
-                "import { createLlmMutator } from '../src/mutators/llm-mutator';\n" +
-                'export const builders = { buildLlmMutatorMap, createLlmMutator };\n',
+                "import { createLlmMutators, isLlmMutatorName } from '../src/mutators/llm-mutator';\n" +
+                'export const builders = { buildLlmMutatorMap, createLlmMutators, isLlmMutatorName };\n',
         );
         bundlePath = path.join(tmpDir, 'map-builders.mjs');
         const built = await Bun.build({
@@ -208,18 +208,18 @@ describe('LLM placement proof — expression edit replaces an expression node (N
 
         const res = await runWorker(bundlePath, FIXTURE_SOURCE, FIXTURE_NAME, survivors);
 
-        // (0) The map + mutator were rebuilt in Node with no drops.
+        // (0) The map + mutators were rebuilt in Node with no drops.
         expect(res.mapSize).toBe(1);
         expect(res.droppedCount).toBe(0);
-        expect(res.after).toBe(res.before + 1); // our llm mutator pushed.
+        expect(res.after).toBe(res.before + 17); // llm wildcard + 16 category mutators pushed.
 
         // (1) NO statementMutantPlacer throw — instrumentation COMPLETED.
         expect(res.threw).toBeUndefined();
         expect(res.instrumented).toBe(true);
 
-        // (2) MANIFEST: the LLM mutant is present, mutatorName 'llm'.
+        // (2) MANIFEST: the LLM mutant is present, named by its category.
         expect(res.ours).toHaveLength(1);
-        expect(res.ours[0]!.mutatorName).toBe('llm');
+        expect(res.ours[0]!.mutatorName).toBe('LlmComparison');
         expect(res.ours[0]!.replacement).toBe('hour > 12');
 
         // (3) SOURCE-SWITCH: its activation switch appears in the printed source.

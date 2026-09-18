@@ -17,7 +17,10 @@
  *
  * Because `.strict()` is on the `llmMutator` object and we parse ONLY that
  * sub-object (never the whole `StrykerOptions`), unknown top-level Stryker keys
- * are irrelevant here.
+ * are irrelevant here. ONE other top-level key is surfaced verbatim, never
+ * interpreted: `excludedMutations`. Stryker matches it case-sensitively by exact
+ * mutator name inside the instrumenter, so the plugin must expand a bare `llm`
+ * entry to the `Llm<Category>` names BEFORE Stryker sees it (`plan.ts`).
  *
  * Config-file format coverage mirrors Stryker's `SUPPORTED_CONFIG_FILE_NAMES`:
  *   • `.mjs` / `.js` / `.cjs` → dynamic `import()`, taking the `default` export
@@ -72,6 +75,12 @@ export interface ReadTargetConfigResult {
      * The driver forwards this to Stryker as `configFile`.
      */
     configFilePath?: string;
+    /**
+     * The target's own `excludedMutations` list, verbatim, when the config file
+     * carries an array of strings under that key; omitted otherwise (absent key,
+     * any other shape, or no config file). `plan.ts` decides what to do with it.
+     */
+    excludedMutations?: readonly string[];
 }
 
 /**
@@ -166,5 +175,14 @@ export async function readTargetConfig(
     const rawOptions = await loadRawOptions(configFilePath);
     const llmMutatorRaw = rawOptions.llmMutator ?? {};
     const config = llmMutatorConfigSchema.parse(llmMutatorRaw);
-    return { config, configFilePath };
+    const excluded = rawOptions.excludedMutations;
+    const excludedMutations =
+        Array.isArray(excluded) && excluded.every(name => typeof name === 'string')
+            ? (excluded as string[])
+            : undefined;
+    return {
+        config,
+        configFilePath,
+        ...(excludedMutations === undefined ? {} : { excludedMutations }),
+    };
 }

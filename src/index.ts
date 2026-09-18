@@ -12,8 +12,9 @@
  * has no public "Mutator" plugin kind: the operator set is hardcoded in the
  * instrumenter as a mutable, non-frozen module-level array (`allMutators`). So we
  * RUNTIME-RESOLVE that array (see `src/instrumenter-registry.ts`) and `push()` our
- * own `NodeMutator`s into it — the heuristic mutators and the single per-run
- * synchronous `LLMMutator` whose replacements the async pre-pass precomputed.
+ * own `NodeMutator`s into it — the heuristic mutators and the per-run synchronous
+ * LLM mutators (one per `Llm<Category>` plus the legacy `llm` wildcard) whose
+ * replacements the async pre-pass precomputed.
  *
  * TWO INTEGRATION PATHS share that injection:
  *   • PRIMARY (M6): `withLlmMutators(config)` — a config-wrapper the consumer drops
@@ -131,6 +132,9 @@ export {
     type BuildProposeTargetsResult,
     buildProposeTargets,
     type CachedTargetProbe,
+    classifyMutation,
+    classifyNodes,
+    countEntriesByCategory,
     type CoverageLookup,
     createBudgetedProvider,
     dedupKey,
@@ -145,10 +149,13 @@ export {
     isLlmWorthy,
     isNearEquivalent,
     isParseable,
+    LLM_CATEGORIES,
+    type LlmCategory,
     type LlmMutatorMap,
     locKeyFromBabelLoc,
     locKeyFromRange,
     type ParsedEntry,
+    parseExpressionTolerant,
     parseReplacementFragment,
     type PrePassLogger,
     type PrePassStopReason,
@@ -219,17 +226,19 @@ export {
 
 // ── Heuristic mutators + monkeypatch injection seam (§3.1.3 / §3.3) ──────────
 //
-// The heuristic NodeMutators (the first being `NumberLiteralValue`) and the
-// `injectMutators()` seam that registers them into Stryker's hardcoded
-// `allMutators` registry. Re-exported so the M0 driver and downstream consumers
-// can both reach them from the package root.
+// The heuristic NodeMutators (the first being `NumberLiteralValue`), the LLM
+// mutator factory + its registered names, and the `injectMutators()` seam that
+// registers them into Stryker's hardcoded `allMutators` registry. Re-exported so
+// the M0 driver and downstream consumers can both reach them from the package root.
 export {
     arrayMethodSwapMutator,
     awaitDropMutator,
     callArgumentTweakMutator,
-    createLlmMutator,
+    createLlmMutators,
     heuristicMutators,
+    isLlmMutatorName,
     LLM_MUTATOR_NAME,
+    LLM_MUTATOR_NAMES,
     type NodeMutator,
     type NodePath,
     numberLiteralValueMutator,
@@ -238,6 +247,23 @@ export {
     stringMethodArgSwapMutator,
 } from './mutators/index';
 export { injectMutators, type InjectMutatorsOptions, type InjectMutatorsResult } from './injection';
+
+// ── The legacy-`llm` directive alias (the second monkeypatch, §3.4 / §5) ─────
+//
+// Plain `// Stryker disable … llm` directives and `excludedMutations: ['llm']`
+// keep covering every `Llm<Category>` mutant: the pure expansions, the
+// bookkeeper-prototype installer (fake-class testable) and the real-module
+// installer used by both integration paths on a dynamic-LLM run.
+export {
+    type DirectiveBookkeeperClass,
+    type DirectiveNode,
+    expandExcludedMutations,
+    expandLlmDirective,
+    installLlmDirectiveAlias,
+    installLlmDirectiveAliasIntoStryker,
+    type InstallLlmDirectiveAliasOptions,
+    resolveDirectiveBookkeeperPath,
+} from './directive-alias';
 
 // ── Driver: switches → mutator selection → in-process Stryker (§2 / §6) ──────
 //

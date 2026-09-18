@@ -17,7 +17,7 @@ import {
 } from '../../src/driver/gate';
 import { CostAccumulator, MockProvider, ResponseCache } from '../../src/llm/index';
 import { createBudgetedProvider } from '../../src/pipeline/budgeted-provider';
-import { LLM_MUTATOR_NAME } from '../../src/mutators/llm-mutator';
+import { LLM_MUTATOR_NAMES } from '../../src/mutators/llm-mutator';
 import { proposeCacheIdentity } from '../../src/pipeline/propose';
 import { buildProposeTargets, type SourceFileInput } from '../../src/pipeline/targeting';
 
@@ -160,7 +160,58 @@ function classify(items, threshold) {
         }
     }
 
-    it('runs the pre-pass with a MockProvider and returns a sync "llm" NodeMutator + cost + map', async () => {
+    it('the pre-pass log line lists the non-zero categories in count order', async () => {
+        await withTempCache(async cache => {
+            const cfg = config({ provider: 'mock', dynamicLLM: { enabled: true } });
+            const cost = new CostAccumulator();
+            const inner = new MockProvider({
+                responder: () => ({
+                    candidates: [
+                        {
+                            original: 'count >= 2',
+                            replacement: 'count > 2',
+                            mutatorTag: 'off-by-one',
+                            rationale: 'boundary',
+                        },
+                        {
+                            original: 'count >= 2',
+                            replacement: 'count >= 3',
+                            mutatorTag: 'literal',
+                            rationale: 'boundary literal',
+                        },
+                        {
+                            original: 'count >= 2',
+                            replacement: 'count <= 2',
+                            mutatorTag: 'flip',
+                            rationale: 'flipped',
+                        },
+                    ],
+                }),
+                costUsd: 0,
+            });
+            const provider = createBudgetedProvider(inner, {
+                cache,
+                cost,
+                maxCostUsd: 5,
+                maxLlmCallsPerRun: 500,
+                defaultModel: 'claude-haiku-4-5',
+            });
+            const lines: string[] = [];
+            const result = await buildLlmMutator(cfg, {
+                provider,
+                costAccumulator: cost,
+                files: files(),
+                cwd: '/abs',
+                log: l => lines.push(l),
+            });
+            expect(result.map.size).toBe(1);
+            const summary = lines.find(l => l.startsWith('LLM pre-pass:'));
+            expect(summary).toContain('by category: LlmComparison=2, LlmNumber=1');
+            expect(summary).not.toContain('LlmOther');
+        });
+    });
+
+    it('runs the pre-pass with a MockProvider and returns the 17 sync NodeMutators + cost + map', async () => {
         await withTempCache(async cache => {
             const cfg = config({ provider: 'mock', dynamicLLM: { enabled: true } });
             const cost = new CostAccumulator();
@@ -196,7 +247,8 @@ function classify(items, threshold) {
                 cwd: '/abs',
             });
 
-            expect(result.mutator.name).toBe(LLM_MUTATOR_NAME);
+            // The static 17-name set (llm wildcard + 16 categories), in order.
+            expect(result.mutators.map(m => m.name)).toEqual([...LLM_MUTATOR_NAMES]);
             expect(result.costSnapshot.calls).toBeGreaterThanOrEqual(1);
             expect(result.costSnapshot.totalUsd).toBeGreaterThan(0);
             // The map holds at least the one survivor candidate.

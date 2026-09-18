@@ -12,6 +12,7 @@ import { llmMutatorConfigSchema, type LlmMutatorConfig } from '../../src/config'
 import type { RunOptions } from '../../src/driver/cli-args';
 import { buildRunPlan } from '../../src/driver/plan';
 import { heuristicMutators } from '../../src/mutators/index';
+import { LLM_CATEGORIES } from '../../src/pipeline/classify';
 
 /** A baseline RunOptions with augment/dry-run defaults; override per test. */
 function options(partial: Partial<RunOptions> = {}): RunOptions {
@@ -163,5 +164,50 @@ describe('buildRunPlan — dynamicLLM gating surfaced in the plan', () => {
     it('marks runDynamicLLM when the switch is on (the driver then gates creds/stub)', () => {
         const plan = buildRunPlan(options(), config({ dynamicLLM: { enabled: true } }), undefined);
         expect(plan.gate.runDynamicLLM).toBe(true);
+    });
+});
+
+describe('buildRunPlan — excludedMutations expansion on the CLI path (Finding 1)', () => {
+    const dynamicOn = (): LlmMutatorConfig =>
+        config({ provider: 'mock', dynamicLLM: { enabled: true } });
+
+    it("expands a target list containing 'llm' to every category when dynamicLLM is on", () => {
+        const plan = buildRunPlan(options(), dynamicOn(), '/proj/stryker.config.json', ['llm']);
+        expect(plan.strykerOptions.excludedMutations).toEqual(['llm', ...LLM_CATEGORIES]);
+        // The other options are untouched.
+        expect(plan.strykerOptions.configFile).toBe('/proj/stryker.config.json');
+    });
+
+    it('never duplicates a category already listed', () => {
+        const plan = buildRunPlan(options(), dynamicOn(), undefined, ['llm', 'LlmNumber']);
+        const list = plan.strykerOptions.excludedMutations!;
+        expect(list.filter(n => n === 'LlmNumber')).toHaveLength(1);
+        expect(list).toHaveLength(1 + LLM_CATEGORIES.length);
+    });
+
+    it("omits the key when the list has no 'llm' (Stryker uses the file's own value)", () => {
+        const plan = buildRunPlan(options(), dynamicOn(), undefined, ['StringLiteral']);
+        expect('excludedMutations' in plan.strykerOptions).toBe(false);
+    });
+
+    it('omits the key on a heuristics-only run even when the list names llm', () => {
+        const plan = buildRunPlan(options(), config(), undefined, ['llm']);
+        expect('excludedMutations' in plan.strykerOptions).toBe(false);
+    });
+
+    it('omits the key when no list was read (4th argument absent)', () => {
+        const plan = buildRunPlan(options(), dynamicOn(), undefined);
+        expect('excludedMutations' in plan.strykerOptions).toBe(false);
+    });
+
+    it('leaves the injection-mode downgrade logic unaffected', () => {
+        const plan = buildRunPlan(
+            options({ mode: 'replace' }),
+            config({ heuristics: { enabled: false }, dynamicLLM: { enabled: true } }),
+            undefined,
+            ['llm'],
+        );
+        expect(plan.mode).toBe('replace');
+        expect(plan.strykerOptions.excludedMutations).toBeDefined();
     });
 });

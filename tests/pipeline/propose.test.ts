@@ -563,6 +563,27 @@ describe('propose — comment-stripped prompt + cache identity', () => {
         expect(proposeCacheIdentity(other, 'haiku', 20).cacheKey).not.toBe(plain.cacheKey);
     });
 
+    it('proposeCacheIdentity: GOLDEN PIN — the key bytes are unchanged since 1.2.3 (6cb2d02)', () => {
+        // Captured at HEAD 6cb2d02 before the Llm<Category> naming change. The
+        // categories are chosen AFTER the cache boundary, so nothing hashed into
+        // this key (model, fingerprint, candidate cap, system prompt, schema) may
+        // move — a drift here would re-buy every cached proposal.
+        const golden = proposeCacheIdentity(
+            {
+                fileName: '/abs/a.ts',
+                spanText:
+                    'function isAfternoon(hour: number): boolean {\n    return hour >= 12;\n}',
+                range: { start: { line: 0, column: 0 }, end: { line: 2, column: 1 } },
+                functionName: 'isAfternoon',
+            } as ProposeTarget,
+            'haiku',
+            20,
+        );
+        expect(golden.cacheKey).toBe(
+            'bae7de487092a6c54c917ea39cfe81d7dd50bb906b09e2e1f3781039c017d858',
+        );
+    });
+
     it('proposeCacheIdentity: meta carries the fingerprint + provenance (functionName only when known)', () => {
         const withName = proposeCacheIdentity(COMMENTED_TARGET, 'haiku', 20);
         expect(withName.meta).toEqual({
