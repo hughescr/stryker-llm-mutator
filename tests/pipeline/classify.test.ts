@@ -159,6 +159,16 @@ const TABLE: Row[] = [
     ['300', '301', 'LlmNumber'],
     ['10n', '11n', 'LlmNumber'],
     ['x', '1', 'LlmNumber'],
+    // Mixed literal kinds (7c): number beats constant beats string, on EITHER side.
+    ['true', '0', 'LlmNumber'],
+    ['0', 'true', 'LlmNumber'],
+    ["'x'", '0', 'LlmNumber'],
+    ['0', "'x'", 'LlmNumber'],
+    ['null', '1n', 'LlmNumber'],
+    ['undefined', '0', 'LlmNumber'],
+    ['`a`', '1', 'LlmNumber'],
+    ['/a/', '1', 'LlmNumber'],
+    ['a > 0', "a > 'x'", 'LlmNumber'],
     // LlmString
     ["'Approve'", "'Reject'", 'LlmString'],
     ['`contact-approve:${uuid}`', '`contact-reject:${uuid}`', 'LlmString'],
@@ -175,6 +185,12 @@ const TABLE: Row[] = [
     ['{ inline: true }', '{ inline: false }', 'LlmConstant'],
     ['x', 'null', 'LlmConstant'],
     ['undefined', 'x', 'LlmConstant'],
+    // Mixed literal kinds (7c): constant beats string, on EITHER side.
+    ["'x'", 'true', 'LlmConstant'],
+    ['true', "'x'", 'LlmConstant'],
+    ['`a`', 'null', 'LlmConstant'],
+    ['undefined', "'x'", 'LlmConstant'],
+    ['/a/', 'false', 'LlmConstant'],
     // LlmStatement
     ["() => { release('timeout'); }", "() => { release('timeout'); return; }", 'LlmStatement'],
     ['x => { return x.id; }', 'x => { x.id; }', 'LlmStatement'],

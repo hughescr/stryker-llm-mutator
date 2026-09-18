@@ -539,33 +539,36 @@ function isCalleeReceiver(chain: readonly Slot[]): boolean {
     return isCalleeSlot(chain[index]);
 }
 
-/** Whether a node is a literal of the given class (7c), `undefined` when it is none. */
-function literalClass(node: Rec | undefined): LlmCategory | undefined {
-    if (node === undefined) {
-        return undefined;
-    }
-    switch (node.type) {
-        case 'NumericLiteral':
-        case 'BigIntLiteral':
-            return 'LlmNumber';
-        case 'BooleanLiteral':
-        case 'NullLiteral':
-            return 'LlmConstant';
-        case 'Identifier':
-            return node.name === 'undefined' ? 'LlmConstant' : undefined;
-        case 'StringLiteral':
-        case 'TemplateLiteral':
-        case 'RegExpLiteral':
-            return 'LlmString';
-        default:
-            return undefined;
-    }
+/** A numeric / bigint literal (7c: `LlmNumber`). */
+function isNumberLiteral(node: Rec): boolean {
+    return node.type === 'NumericLiteral' || node.type === 'BigIntLiteral';
+}
+
+/** `true` / `false` / `null` / `undefined` (7c: `LlmConstant`). */
+function isConstantLiteral(node: Rec): boolean {
+    return (
+        node.type === 'BooleanLiteral' ||
+        node.type === 'NullLiteral' ||
+        (node.type === 'Identifier' && node.name === 'undefined')
+    );
+}
+
+/** A string, template or regex literal (7c: `LlmString`). */
+function isStringLiteral(node: Rec): boolean {
+    return (
+        node.type === 'StringLiteral' ||
+        node.type === 'TemplateLiteral' ||
+        node.type === 'RegExpLiteral'
+    );
 }
 
 /**
  * Step 7c precedence: the first rule whose predicate matches EITHER side wins.
  * A rule may derive the category from the matching node (a binary operator's
- * class, a literal's kind).
+ * class). The three literal kinds are three ORDERED rules — number, then
+ * constant, then string — so a mixed pair (`true → 0`, `'x' → 0`) is named by
+ * the higher-precedence kind whichever side carries it, never by the original
+ * side's kind alone.
  */
 const UNRELATED_RULES: ReadonlyArray<{
     matches: (node: Rec) => boolean;
@@ -579,7 +582,9 @@ const UNRELATED_RULES: ReadonlyArray<{
     { matches: n => n.type === 'LogicalExpression', category: n => logicalClass(n.operator) },
     { matches: n => n.type === 'BinaryExpression', category: n => binaryClass(n.operator) },
     { matches: n => CALL_TYPES.has(n.type), category: () => 'LlmMethod' },
-    { matches: n => literalClass(n) !== undefined, category: n => literalClass(n) ?? 'LlmOther' },
+    { matches: isNumberLiteral, category: () => 'LlmNumber' },
+    { matches: isConstantLiteral, category: () => 'LlmConstant' },
+    { matches: isStringLiteral, category: () => 'LlmString' },
     { matches: n => MEMBER_TYPES.has(n.type), category: () => 'LlmProperty' },
     { matches: n => ARGUMENT_TYPES.has(n.type), category: () => 'LlmArgument' },
     { matches: n => n.type === 'UpdateExpression', category: () => 'LlmArithmetic' },

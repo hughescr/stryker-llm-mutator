@@ -1,14 +1,16 @@
 /*
  * Offline tests for `scripts/migrate-incremental-llm-names.ts`: the PURE core
  * over a fabricated `stryker-incremental.json` (1-based line AND column, with the
- * embedded `source`), and the CLI's refusal / dry-run behaviour in a temp dir.
+ * embedded `source`), and the CLI's refusal / dry-run behaviour in a temp dir —
+ * including that a symlinked, hard-linked, dangling-symlinked or plain existing
+ * `--out` is refused, so the input inode can never be truncated through an alias.
  * No Stryker run; the real-differ reuse proof lives in
  * `tests/injection/incremental-migration-proof.test.ts`.
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import { spawn } from 'node:child_process';
-import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { link, lstat, mkdtemp, readdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -16,6 +18,7 @@ import { fileURLToPath } from 'node:url';
 import {
     defaultOutputPath,
     migrateIncrementalLlmNames,
+    writeReportExclusively,
     type MigrationStats,
 } from '../../scripts/migrate-incremental-llm-names';
 
@@ -326,5 +329,109 @@ describe('CLI (temp dir)', () => {
         expect(migrated.files['src/a.ts']!.mutants[0]!.mutatorName).toBe('LlmComparison');
         // The input is byte-identical.
         expect(await readFile(input, 'utf8')).toBe(JSON.stringify(report()));
+    });
+
+    // The no-in-place guarantee must hold for filesystem ALIASES too: a path
+    // comparison alone lets a symlink or hard link named `--out` truncate the
+    // input inode. Each case: exit 2, nothing written, the input byte-identical,
+    // and the alias itself left exactly as it was.
+    async function expectRefusedAlias(
+        outName: string,
+        setup: (input: string, out: string) => Promise<void>,
+    ): Promise<void> {
+        const input = join(dir, 'stryker-incremental.json');
+        const out = join(dir, outName);
+        await setup(input, out);
+        const before = await readFile(input, 'utf8');
+        const outBefore = await lstat(out);
+        const { code, stderr } = await run(['--in', input, '--out', out]);
+        expect(code).toBe(2);
+        expect(stderr).toContain('already exists');
+        expect(await readFile(input, 'utf8')).toBe(before);
+        expect(before).toBe(JSON.stringify(report()));
+        const outAfter = await lstat(out);
+        expect(outAfter.isSymbolicLink()).toBe(outBefore.isSymbolicLink());
+        expect(outAfter.size).toBe(outBefore.size);
+        expect((await readdir(dir)).toSorted()).toEqual(
+            ['stryker-incremental.json', outName].toSorted(),
+        );
+    }
+
+    it('refuses a symlinked --out (a symlink to --in): the input is never touched', async () => {
+        await expectRefusedAlias('out.json', (input, out) => symlink(input, out));
+    });
+
+    it('refuses a hard-linked --out (a hard link to --in): the input is never touched', async () => {
+        await expectRefusedAlias('out.json', (input, out) => link(input, out));
+    });
+
+    it('refuses an --out that already exists as a regular file (never overwrites)', async () => {
+        await expectRefusedAlias('out.json', (_input, out) =>
+            writeFile(out, '{"stale":1}', 'utf8'),
+        );
+    });
+
+    it('refuses the default sibling path when a previous run left it behind', async () => {
+        const input = join(dir, 'stryker-incremental.json');
+        const out = join(dir, 'stryker-incremental.llm-migrated.json');
+        await writeFile(out, '{"stale":1}', 'utf8');
+        const { code, stderr } = await run(['--in', input]);
+        expect(code).toBe(2);
+        expect(stderr).toContain('already exists');
+        expect(await readFile(out, 'utf8')).toBe('{"stale":1}');
+    });
+
+    it('refuses a dangling symlink at --out (it would be followed on create)', async () => {
+        const input = join(dir, 'stryker-incremental.json');
+        const out = join(dir, 'out.json');
+        const target = join(dir, 'elsewhere.json');
+        await symlink(target, out);
+        const { code, stderr } = await run(['--in', input, '--out', out]);
+        expect(code).toBe(2);
+        expect(stderr).toContain('already exists');
+        expect((await readdir(dir)).toSorted()).toEqual(['out.json', 'stryker-incremental.json']);
+    });
+
+    it('--dry-run with an existing --out still prints the table and writes nothing', async () => {
+        const input = join(dir, 'stryker-incremental.json');
+        const out = join(dir, 'out.json');
+        await symlink(input, out);
+        const { code, stdout } = await run(['--in', input, '--out', out, '--dry-run']);
+        expect(code).toBe(0);
+        expect(stdout).toContain('[dry-run]');
+        expect(await readFile(input, 'utf8')).toBe(JSON.stringify(report()));
+    });
+});
+
+describe('writeReportExclusively', () => {
+    let dir = '';
+
+    beforeEach(async () => {
+        dir = await mkdtemp(join(tmpdir(), 'stryker-llm-migrate-wx-'));
+    });
+
+    afterEach(async () => {
+        await rm(dir, { recursive: true, force: true });
+    });
+
+    it('creates a new file', async () => {
+        const out = join(dir, 'new.json');
+        await writeReportExclusively(out, '{"a":1}');
+        expect(await readFile(out, 'utf8')).toBe('{"a":1}');
+    });
+
+    it('rejects when the path already exists (the create is exclusive, so a race cannot truncate)', async () => {
+        const original = join(dir, 'in.json');
+        const alias = join(dir, 'alias.json');
+        await writeFile(original, '{"keep":true}', 'utf8');
+        await symlink(original, alias);
+        await expect(writeReportExclusively(alias, '{"a":1}')).rejects.toThrow(/already exists/);
+        await expect(writeReportExclusively(original, '{"a":1}')).rejects.toThrow(/already exists/);
+        expect(await readFile(original, 'utf8')).toBe('{"keep":true}');
+    });
+
+    it('rethrows a non-EEXIST failure unchanged', async () => {
+        const out = join(dir, 'missing-dir', 'new.json');
+        await expect(writeReportExclusively(out, '{"a":1}')).rejects.toThrow(/ENOENT/);
     });
 });

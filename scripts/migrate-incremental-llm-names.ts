@@ -57,10 +57,15 @@
  *   bun scripts/migrate-incremental-llm-names.ts --in reports/stryker-incremental.json
  *       [--out <path>] [--dry-run]
  *   `--out` defaults to `<in-dir>/<in-basename>.llm-migrated.json`. The script
- *   REFUSES (exit 2) when `--out` resolves to the same path as `--in` — it never
- *   writes in place and never touches any other file. Run it only when NO
- *   Stryker run is writing the report; then copy the migrated file over
- *   `reports/stryker-incremental.json` yourself.
+ *   REFUSES (exit 2) when `--out` resolves to the same path as `--in`, and when
+ *   ANYTHING already exists at `--out` — a regular file, a hard link, a symlink
+ *   (dangling or not) — because a path comparison alone cannot see filesystem
+ *   aliases and a truncating write through one would overwrite the input. The
+ *   output is created EXCLUSIVELY (`O_EXCL`), so it never writes in place, never
+ *   overwrites, and never touches any other file. Run it only when NO Stryker
+ *   run is writing the report; then copy the migrated file over
+ *   `reports/stryker-incremental.json` yourself (and delete the migrated copy
+ *   before re-running).
  *
  * Imports from SRC (not dist): scripts are runnable drivers, not library code.
  * The core is exported so it is unit-tested; the CLI runs only when this file is
@@ -68,7 +73,7 @@
  */
 
 import { parseArgs } from 'node:util';
-import { readFile, writeFile } from 'node:fs/promises';
+import { lstat, readFile, writeFile } from 'node:fs/promises';
 import { basename, dirname, extname, join, resolve } from 'node:path';
 
 import { classifyNodes, LLM_CATEGORIES, type LlmCategory } from '../src/pipeline/classify';
@@ -337,6 +342,48 @@ export function formatStats(stats: MigrationStats, dryRun: boolean): string {
     return lines.join('\n');
 }
 
+/** Whether anything (a file, a symlink — dangling or not, a directory) exists at `path`. */
+async function existsAtPath(path: string): Promise<boolean> {
+    try {
+        // `lstat`, not `stat`: a dangling symlink must count as existing, since a
+        // create through it would be FOLLOWED and write wherever it points.
+        await lstat(path);
+        return true;
+    } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+            return false;
+        }
+        throw error;
+    }
+}
+
+/**
+ * Write the migrated report to a path that must NOT already exist. The create
+ * is exclusive (`O_CREAT | O_EXCL`, flag `wx`), so it can never truncate an
+ * existing inode — a plain string comparison of `--out` against `--in` would
+ * let a symlink or hard link named `--out` overwrite the input, because
+ * `resolve()` does not resolve filesystem aliases while a truncating open
+ * follows them. `O_EXCL` refuses symlinks (even dangling ones) and hard links
+ * alike, and holds under a race with a concurrent creator.
+ *
+ * @throws An `Error` whose message contains "already exists" when `path` is
+ *   taken; any other failure is rethrown unchanged.
+ */
+export async function writeReportExclusively(path: string, contents: string): Promise<void> {
+    try {
+        await writeFile(path, contents, { encoding: 'utf8', flag: 'wx' });
+    } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
+            throw new Error(
+                `refusing: --out already exists (${path}); this script never overwrites or writes in place. ` +
+                    'Move or delete it (or pass a fresh --out) and run again.',
+                { cause: error },
+            );
+        }
+        throw error;
+    }
+}
+
 // ── CLI ──────────────────────────────────────────────────────────────────────
 
 if (import.meta.main) {
@@ -361,12 +408,30 @@ if (import.meta.main) {
         );
         process.exit(2);
     }
+    // Fail fast, before any work: an existing `--out` (a regular file, a hard
+    // link, a symlink — dangling or to `--in`) is refused. The exclusive create
+    // below re-checks at write time, so a race cannot slip past this.
+    if (!values['dry-run'] && (await existsAtPath(outputPath))) {
+        process.stderr.write(
+            `refusing: --out already exists (${outputPath}); this script never overwrites or writes in place. ` +
+                'Move or delete it (or pass a fresh --out) and run again.\n',
+        );
+        process.exit(2);
+    }
     const report: unknown = JSON.parse(await readFile(inputPath, 'utf8'));
     const { report: migrated, stats } = migrateIncrementalLlmNames(report);
     // eslint-disable-next-line no-console -- CLI summary.
     console.log(formatStats(stats, values['dry-run']));
     if (!values['dry-run']) {
-        await writeFile(outputPath, JSON.stringify(migrated), 'utf8');
+        try {
+            await writeReportExclusively(outputPath, JSON.stringify(migrated));
+        } catch (error) {
+            if (error instanceof Error && error.message.includes('already exists')) {
+                process.stderr.write(`${error.message}\n`);
+                process.exit(2);
+            }
+            throw error;
+        }
         // eslint-disable-next-line no-console -- CLI summary.
         console.log(`wrote ${outputPath}`);
     }

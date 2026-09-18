@@ -739,8 +739,10 @@ tenth of a run). `scripts/migrate-incremental-llm-names.ts` renames those rows
 OFFLINE: for each `llm` row it slices the report's own `source` at the row's
 1-based `location`, parses slice + `replacement`, undoes the shorthand-object
 lift where it applies, and writes `classifyNodes(...)` into `mutatorName` — and
-nothing else. It writes a SEPARATE `<name>.llm-migrated.json` (never in place;
-the human copies it over between runs). Sound by construction: the differ still
+nothing else. It writes a SEPARATE `<name>.llm-migrated.json` with an exclusive
+create (`O_EXCL`: never in place and never over an existing file, hard link or
+symlink — a path comparison alone cannot see aliases; the human copies it over
+between runs). Sound by construction: the differ still
 performs its full source diff and test-key checks; renaming can only turn a
 guaranteed miss into a hit when the live plugin assigns the same name to the
 same `(file, location, replacement)`, which is the very code change the old
